@@ -1,0 +1,119 @@
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - templates/*
+
+parameters:
+- name: environmentName
+  displayName: Environment
+  type: string
+  default: dev
+  values:
+  - dev
+  - test
+  - prod
+
+variables:
+  - group: ADF-${{ parameters.environmentName }}-Variables
+  - name: location
+    value: 'UK South'
+  - name: resourceGroupName
+    value: 'rg-adf-${{ parameters.environmentName }}'
+  - name: dataFactoryName
+    value: 'test-ist-df-${{ parameters.environmentName }}-datasync'
+  - name: vmName
+    value: 'vm-shir-${{ parameters.environmentName }}'
+  - name: shirName
+    value: 'ir10Prem'
+  - name: shirVmPasswordSecretName
+    value: 'shir-vm-password'
+  - name: cmkKeyName
+    value: 'adf-cmk-${{ parameters.environmentName }}'
+
+stages:
+- stage: Validate
+  displayName: 'Validate ARM Templates'
+  jobs:
+  - job: ValidateTemplates
+    displayName: 'Validate Templates'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Validate ARM Templates'
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az deployment group validate \
+            --resource-group $(resourceGroupName) \
+            --template-file $(System.DefaultWorkingDirectory)/templates/azuredeploy.json \
+            --parameters @$(System.DefaultWorkingDirectory)/templates/azuredeploy.parameters.${{ parameters.environmentName }}.json \
+            --parameters dataFactoryName=$(dataFactoryName) \
+                         location=$(location) \
+                         keyVaultName=$(KeyVaultName) \
+                         shirVmPasswordSecretName=$(shirVmPasswordSecretName) \
+                         cmkKeyName=$(cmkKeyName)
+
+- stage: Deploy
+  displayName: 'Deploy Infrastructure'
+  dependsOn: Validate
+  jobs:
+  - job: PrepareKeyVault
+    displayName: 'Prepare Key Vault Secrets'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: AzurePowerShell@5
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        ScriptType: 'FilePath'
+        ScriptPath: '$(System.DefaultWorkingDirectory)/scripts/Create-KeyVaultSecret.ps1'
+        ScriptArguments: '-KeyVaultName $(KeyVaultName) -SecretName $(shirVmPasswordSecretName)'
+        azurePowerShellVersion: 'LatestVersion'
+
+  - job: DeployInfrastructure
+    displayName: 'Deploy ADF & Components'
+    dependsOn: PrepareKeyVault
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: AzureKeyVault@2
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        KeyVaultName: '$(KeyVaultName)'
+        SecretsFilter: '*'
+        RunAsPreJob: true
+    
+    - task: AzureResourceManagerTemplateDeployment@3
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: '$(ServiceConnection)'
+        subscriptionId: '$(SubscriptionId)'
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(resourceGroupName)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: '$(System.DefaultWorkingDirectory)/templates/azuredeploy.json'
+        csmParametersFile: '$(System.DefaultWorkingDirectory)/templates/azuredeploy.parameters.${{ parameters.environmentName }}.json'
+        deploymentMode: 'Incremental'
+        deploymentName: 'ADF-Deployment-$(Build.BuildNumber)'
+        overrideParameters: '-dataFactoryName "$(dataFactoryName)" -location "$(location)" -keyVaultName "$(KeyVaultName)" -shirVmPasswordSecretName "$(shirVmPasswordSecretName)" -shirName "$(shirName)" -vmName "$(vmName)" -cmkKeyName "$(cmkKeyName)"'
+    
+  - job: ConfigureSHIR
+    displayName: 'Configure Self-Hosted Integration Runtime'
+    dependsOn: DeployInfrastructure
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: AzurePowerShell@5
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        ScriptType: 'FilePath'
+        ScriptPath: '$(System.DefaultWorkingDirectory)/scripts/Configure-SHIR.ps1'
+        ScriptArguments: '-ResourceGroupName $(resourceGroupName) -DataFactoryName $(dataFactoryName) -IntegrationRuntimeName $(shirName) -VMName $(vmName)'
+        azurePowerShellVersion: 'LatestVersion'

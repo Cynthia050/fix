@@ -1,0 +1,266 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "dataFactoryName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Azure Data Factory"
+        }
+      },
+      "location": {
+        "type": "string",
+        "metadata": {
+          "description": "Location for the resources"
+        }
+      },
+      "shirName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Self-Hosted Integration Runtime"
+        }
+      },
+      "vmName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the VM for SHIR"
+        }
+      },
+      "vmSize": {
+        "type": "string",
+        "defaultValue": "Standard_D8s_v3",
+        "metadata": {
+          "description": "Size of the VM for SHIR"
+        }
+      },
+      "subnetId": {
+        "type": "string",
+        "metadata": {
+          "description": "Resource ID of the subnet"
+        }
+      },
+      "adminUsername": {
+        "type": "string",
+        "metadata": {
+          "description": "Admin username for the SHIR VM"
+        }
+      },
+      "keyVaultName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Key Vault"
+        }
+      },
+      "shirVmPasswordSecretName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Key Vault Secret containing SHIR VM admin password"
+        }
+      },
+      "concurrentJobsLimit": {
+        "type": "int",
+        "defaultValue": 24,
+        "metadata": {
+          "description": "Concurrent jobs limit for SHIR"
+        }
+      }
+    },
+    "variables": {
+      "nicName": "[concat(parameters('vmName'), '-nic')]",
+      "publicIPAddressName": "[concat(parameters('vmName'), '-pip')]",
+      "nsgName": "[concat(parameters('vmName'), '-nsg')]",
+      "diagnosticsStorageAccountName": "[concat('diag', uniqueString(resourceGroup().id))]",
+      "scriptUrl": "[concat('https://raw.githubusercontent.com/Azure/azure-quickstart-templates/master/quickstarts/microsoft.datafactory/data-factory-v2-create-self-hosted-integration-runtime/scripts/installSHIRGateway.ps1')]"
+    },
+    "resources": [
+      {
+        "type": "Microsoft.DataFactory/factories/integrationRuntimes",
+        "apiVersion": "2018-06-01",
+        "name": "[concat(parameters('dataFactoryName'), '/', parameters('shirName'))]",
+        "properties": {
+          "type": "SelfHosted",
+          "description": "Self-Hosted Integration Runtime",
+          "typeProperties": {
+            "linkedInfo": {}
+          }
+        }
+      },
+      {
+        "type": "Microsoft.Storage/storageAccounts",
+        "apiVersion": "2021-08-01",
+        "name": "[variables('diagnosticsStorageAccountName')]",
+        "location": "[parameters('location')]",
+        "sku": {
+          "name": "Standard_LRS"
+        },
+        "kind": "StorageV2",
+        "properties": {}
+      },
+      {
+        "type": "Microsoft.Network/networkSecurityGroups",
+        "apiVersion": "2021-05-01",
+        "name": "[variables('nsgName')]",
+        "location": "[parameters('location')]",
+        "properties": {
+          "securityRules": [
+            {
+              "name": "RDP",
+              "properties": {
+                "priority": 1000,
+                "protocol": "Tcp",
+                "access": "Allow",
+                "direction": "Inbound",
+                "sourceAddressPrefix": "*",
+                "sourcePortRange": "*",
+                "destinationAddressPrefix": "*",
+                "destinationPortRange": "3389"
+              }
+            },
+            {
+              "name": "ADF-to-ADLS",
+              "properties": {
+                "priority": 1010,
+                "protocol": "Tcp",
+                "access": "Allow",
+                "direction": "Outbound",
+                "sourceAddressPrefix": "*",
+                "sourcePortRange": "*",
+                "destinationAddressPrefix": "Storage",
+                "destinationPortRange": "443"
+              }
+            },
+            {
+              "name": "ADF-to-KeyVault",
+              "properties": {
+                "priority": 1020,
+                "protocol": "Tcp",
+                "access": "Allow",
+                "direction": "Outbound",
+                "sourceAddressPrefix": "*",
+                "sourcePortRange": "*",
+                "destinationAddressPrefix": "AzureKeyVault",
+                "destinationPortRange": "443"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "type": "Microsoft.Network/publicIPAddresses",
+        "apiVersion": "2021-05-01",
+        "name": "[variables('publicIPAddressName')]",
+        "location": "[parameters('location')]",
+        "properties": {
+          "publicIPAllocationMethod": "Dynamic"
+        }
+      },
+      {
+        "type": "Microsoft.Network/networkInterfaces",
+        "apiVersion": "2021-05-01",
+        "name": "[variables('nicName')]",
+        "location": "[parameters('location')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]",
+          "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+        ],
+        "properties": {
+          "ipConfigurations": [
+            {
+              "name": "ipconfig1",
+              "properties": {
+                "privateIPAllocationMethod": "Dynamic",
+                "publicIPAddress": {
+                  "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]"
+                },
+                "subnet": {
+                  "id": "[parameters('subnetId')]"
+                }
+              }
+            }
+          ],
+          "networkSecurityGroup": {
+            "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+          }
+        }
+      },
+      {
+        "type": "Microsoft.Compute/virtualMachines",
+        "apiVersion": "2022-03-01",
+        "name": "[parameters('vmName')]",
+        "location": "[parameters('location')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]",
+          "[resourceId('Microsoft.Storage/storageAccounts', variables('diagnosticsStorageAccountName'))]"
+        ],
+        "properties": {
+          "hardwareProfile": {
+            "vmSize": "[parameters('vmSize')]"
+          },
+          "osProfile": {
+            "computerName": "[parameters('vmName')]",
+            "adminUsername": "[parameters('adminUsername')]",
+            "adminPassword": "[concat('@Microsoft.KeyVault(SecretUri=', reference(resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), parameters('shirVmPasswordSecretName')), '2019-09-01').secretUriWithVersion, ')')]"
+          },
+          "storageProfile": {
+            "imageReference": {
+              "publisher": "MicrosoftWindowsServer",
+              "offer": "WindowsServer",
+              "sku": "2019-Datacenter",
+              "version": "latest"
+            },
+            "osDisk": {
+              "createOption": "FromImage",
+              "managedDisk": {
+                "storageAccountType": "Premium_LRS"
+              }
+            }
+          },
+          "networkProfile": {
+            "networkInterfaces": [
+              {
+                "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+              }
+            ]
+          },
+          "diagnosticsProfile": {
+            "bootDiagnostics": {
+              "enabled": true,
+              "storageUri": "[reference(resourceId('Microsoft.Storage/storageAccounts', variables('diagnosticsStorageAccountName'))).primaryEndpoints.blob]"
+            }
+          }
+        }
+      },
+      {
+        "type": "Microsoft.Compute/virtualMachines/extensions",
+        "apiVersion": "2022-03-01",
+        "name": "[concat(parameters('vmName'), '/CustomScriptExtension')]",
+        "location": "[parameters('location')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]",
+          "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), parameters('shirName'))]"
+        ],
+        "properties": {
+          "publisher": "Microsoft.Compute",
+          "type": "CustomScriptExtension",
+          "typeHandlerVersion": "1.10",
+          "autoUpgradeMinorVersion": true,
+          "settings": {
+            "fileUris": [
+              "[variables('scriptUrl')]"
+            ],
+            "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File installSHIRGateway.ps1 -gatewayKey \"', listAuthKeys(resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), parameters('shirName')), '2018-06-01').authKey1, '\" -concurrentJobsLimit \"', parameters('concurrentJobsLimit'), '\"')]"
+          }
+        }
+      }
+    ],
+    "outputs": {
+      "shirId": {
+        "type": "string",
+        "value": "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), parameters('shirName'))]"
+      },
+      "vmId": {
+        "type": "string",
+        "value": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      }
+    }
+  }

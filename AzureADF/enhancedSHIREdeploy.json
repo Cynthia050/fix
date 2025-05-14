@@ -1,0 +1,436 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "dataFactoryName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Azure Data Factory"
+        }
+      },
+      "location": {
+        "type": "string",
+        "metadata": {
+          "description": "Location for the resources"
+        }
+      },
+      "shirName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Self-Hosted Integration Runtime"
+        }
+      },
+      "vmName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the VM for SHIR"
+        }
+      },
+      "vmSize": {
+        "type": "string",
+        "defaultValue": "Standard_D8s_v3",
+        "metadata": {
+          "description": "Size of the VM for SHIR"
+        }
+      },
+      "nicName": {
+        "type": "string",
+        "defaultValue": "[concat(parameters('vmName'), '-nic')]",
+        "metadata": {
+          "description": "Name of the network interface"
+        }
+      },
+      "subnetId": {
+        "type": "string",
+        "metadata": {
+          "description": "Resource ID of the subnet"
+        }
+      },
+      "adminUsername": {
+        "type": "string",
+        "defaultValue": "shiradmin",
+        "metadata": {
+          "description": "Admin username for the SHIR VM"
+        }
+      },
+      "keyVaultName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Key Vault"
+        }
+      },
+      "shirVmPasswordSecretName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Key Vault Secret containing SHIR VM admin password"
+        }
+      },
+      "concurrentJobsLimit": {
+        "type": "int",
+        "defaultValue": 24,
+        "metadata": {
+          "description": "Concurrent jobs limit for SHIR"
+        }
+      },
+      "recoveryServicesVaultName": {
+        "type": "string",
+        "defaultValue": "[concat('rsv-', parameters('vmName'))]",
+        "metadata": {
+          "description": "Name of the Recovery Services Vault for VM backup"
+        }
+      },
+      "backupPolicyName": {
+        "type": "string",
+        "defaultValue": "DefaultPolicy",
+        "metadata": {
+          "description": "Name of the backup policy"
+        }
+      },
+      "diskEncryptionSetId": {
+        "type": "string",
+        "defaultValue": "",
+        "metadata": {
+          "description": "Resource ID of the disk encryption set"
+        }
+      },
+      "existingStorageAccountId": {
+        "type": "string",
+        "defaultValue": "",
+        "metadata": {
+          "description": "Resource ID of the existing storage account"
+        }
+      },
+      "privateDnsZoneName": {
+        "type": "string",
+        "defaultValue": "privatelink.datafactory.azure.net",
+        "metadata": {
+          "description": "Name of the private DNS zone"
+        }
+      },
+      "osType": {
+        "type": "string",
+        "defaultValue": "Windows",
+        "allowedValues": ["Windows", "Linux"],
+        "metadata": {
+          "description": "Type of operating system"
+        }
+      },
+      "workspaceResourceId": {
+        "type": "string",
+        "defaultValue": "",
+        "metadata": {
+          "description": "Resource ID of the Log Analytics workspace"
+        }
+      }
+    },
+    "variables": {
+      "publicIPAddressName": "[concat(parameters('vmName'), '-pip')]",
+      "nsgName": "[concat(parameters('vmName'), '-nsg')]",
+      "diagnosticsStorageAccountName": "[concat('diag', uniqueString(resourceGroup().id))]",
+      "scriptUrl": "[concat('https://raw.githubusercontent.com/Azure/azure-quickstart-templates/master/quickstarts/microsoft.datafactory/data-factory-v2-create-self-hosted-integration-runtime/scripts/installSHIRGateway.ps1')]",
+      "imageReference": {
+        "Windows": {
+          "publisher": "MicrosoftWindowsServer",
+          "offer": "WindowsServer",
+          "sku": "2019-Datacenter",
+          "version": "latest"
+        },
+        "Linux": {
+          "publisher": "Canonical",
+          "offer": "UbuntuServer",
+          "sku": "18.04-LTS",
+          "version": "latest"
+        }
+      },
+      "dataDiskName": "[concat(parameters('vmName'), '-osdisk')]",
+      "backupIntentName": "[concat(parameters('vmName'), '-', 'BackupIntent')]",
+      "monitorAgentName": "[concat(parameters('vmName'), 'AzureMonitorWindowsAgent')]",
+      "dependentAgentName": "[concat(parameters('vmName'), 'DependentAgent')]"
+    },
+    "resources": [
+      {
+        "type": "Microsoft.DataFactory/factories/integrationRuntimes",
+        "apiVersion": "2018-06-01",
+        "name": "[concat(parameters('dataFactoryName'), '/', parameters('shirName'))]",
+        "properties": {
+          "type": "SelfHosted",
+          "description": "Self-Hosted Integration Runtime",
+          "typeProperties": {
+            "linkedInfo": {}
+          }
+        }
+      },
+      {
+        "type": "Microsoft.Storage/storageAccounts",
+        "apiVersion": "2021-08-01",
+        "name": "[variables('diagnosticsStorageAccountName')]",
+        "location": "[parameters('location')]",
+        "condition": "[empty(parameters('existingStorageAccountId'))]",
+        "sku": {
+          "name": "Standard_LRS"
+        },
+        "kind": "StorageV2",
+        "properties": {}
+      },
+      {
+        "type": "Microsoft.Network/networkSecurityGroups",
+        "apiVersion": "2021-05-01",
+        "name": "[variables('nsgName')]",
+        "location": "[parameters('location')]",
+        "properties": {
+          "securityRules": [
+            {
+              "name": "RDP",
+              "properties": {
+                "priority": 1000,
+                "protocol": "Tcp",
+                "access": "Allow",
+                "direction": "Inbound",
+                "sourceAddressPrefix": "*",
+                "sourcePortRange": "*",
+                "destinationAddressPrefix": "*",
+                "destinationPortRange": "3389"
+              }
+            },
+            {
+              "name": "ADF-to-ADLS",
+              "properties": {
+                "priority": 1010,
+                "protocol": "Tcp",
+                "access": "Allow",
+                "direction": "Outbound",
+                "sourceAddressPrefix": "*",
+                "sourcePortRange": "*",
+                "destinationAddressPrefix": "Storage",
+                "destinationPortRange": "443"
+              }
+            },
+            {
+              "name": "ADF-to-KeyVault",
+              "properties": {
+                "priority": 1020,
+                "protocol": "Tcp",
+                "access": "Allow",
+                "direction": "Outbound",
+                "sourceAddressPrefix": "*",
+                "sourcePortRange": "*",
+                "destinationAddressPrefix": "AzureKeyVault",
+                "destinationPortRange": "443"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "type": "Microsoft.Network/publicIPAddresses",
+        "apiVersion": "2021-05-01",
+        "name": "[variables('publicIPAddressName')]",
+        "location": "[parameters('location')]",
+        "properties": {
+          "publicIPAllocationMethod": "Dynamic"
+        }
+      },
+      {
+        "type": "Microsoft.Network/networkInterfaces",
+        "apiVersion": "2021-05-01",
+        "name": "[parameters('nicName')]",
+        "location": "[parameters('location')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]",
+          "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+        ],
+        "properties": {
+          "ipConfigurations": [
+            {
+              "name": "ipconfig1",
+              "properties": {
+                "privateIPAllocationMethod": "Dynamic",
+                "publicIPAddress": {
+                  "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]"
+                },
+                "subnet": {
+                  "id": "[parameters('subnetId')]"
+                },
+                "privateIPAllocationMethod": "Dynamic"
+              }
+            }
+          ],
+          "networkSecurityGroup": {
+            "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+          },
+          "enableAcceleratedNetworking": true
+        },
+        "tags": "[parameters('tagsByResource')]"
+      },
+      {
+        "type": "Microsoft.Compute/virtualMachines",
+        "apiVersion": "2022-03-01",
+        "name": "[parameters('vmName')]",
+        "location": "[parameters('location')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]",
+          "[resourceId('Microsoft.Storage/storageAccounts', variables('diagnosticsStorageAccountName'))]"
+        ],
+        "properties": {
+          "hardwareProfile": {
+            "vmSize": "[parameters('vmSize')]"
+          },
+          "osProfile": {
+            "computerName": "[parameters('vmName')]",
+            "adminUsername": "[parameters('adminUsername')]",
+            "adminPassword": "[concat('@Microsoft.KeyVault(SecretUri=', reference(resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), parameters('shirVmPasswordSecretName')), '2019-09-01').secretUriWithVersion, ')')]",
+            "windowsConfiguration": {
+              "enableAutomaticUpdates": true,
+              "provisionVMAgent": true,
+              "patchSettings": {
+                "enableHotpatching": false,
+                "patchMode": "AutomaticByOS"
+              }
+            }
+          },
+          "storageProfile": {
+            "imageReference": "[variables('imageReference')[parameters('osType')]]",
+            "osDisk": {
+              "name": "[variables('dataDiskName')]",
+              "createOption": "FromImage",
+              "managedDisk": {
+                "storageAccountType": "Premium_LRS",
+                "diskEncryptionSet": "[if(empty(parameters('diskEncryptionSetId')), json('null'), json(concat('{\"id\": \"', parameters('diskEncryptionSetId'), '\"}')))]"
+              }
+            }
+          },
+          "networkProfile": {
+            "networkInterfaces": [
+              {
+                "id": "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]"
+              }
+            ]
+          },
+          "diagnosticsProfile": {
+            "bootDiagnostics": {
+              "enabled": true,
+              "storageUri": "[if(empty(parameters('existingStorageAccountId')), reference(resourceId('Microsoft.Storage/storageAccounts', variables('diagnosticsStorageAccountName'))).primaryEndpoints.blob, reference(parameters('existingStorageAccountId'), '2021-08-01').primaryEndpoints.blob)]"
+            }
+          },
+          "licenseType": "Windows_Server"
+        },
+        "tags": "[parameters('tagsByResource')]"
+      },
+      {
+        "type": "Microsoft.Compute/virtualMachines/extensions",
+        "apiVersion": "2022-03-01",
+        "name": "[concat(parameters('vmName'), '/CustomScriptExtension')]",
+        "location": "[parameters('location')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]",
+          "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), parameters('shirName'))]"
+        ],
+        "properties": {
+          "publisher": "Microsoft.Compute",
+          "type": "CustomScriptExtension",
+          "typeHandlerVersion": "1.10",
+          "autoUpgradeMinorVersion": true,
+          "settings": {
+            "fileUris": [
+              "[variables('scriptUrl')]"
+            ],
+            "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File installSHIRGateway.ps1 -gatewayKey \"', listAuthKeys(resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), parameters('shirName')), '2018-06-01').authKey1, '\" -concurrentJobsLimit \"', parameters('concurrentJobsLimit'), '\"')]"
+          }
+        }
+      },
+      {
+        "type": "Microsoft.Compute/virtualMachines/extensions",
+        "apiVersion": "2022-03-01",
+        "name": "[concat(parameters('vmName'), '/', variables('monitorAgentName'))]",
+        "location": "[parameters('location')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]",
+          "[resourceId('Microsoft.Compute/virtualMachines/extensions', parameters('vmName'), 'CustomScriptExtension')]"
+        ],
+        "properties": {
+          "publisher": "Microsoft.Azure.Monitor",
+          "type": "AzureMonitorWindowsAgent",
+          "typeHandlerVersion": "1.0",
+          "autoUpgradeMinorVersion": true,
+          "enableAutomaticUpgrade": true,
+          "settings": {
+            "workspaceId": "[if(empty(parameters('workspaceResourceId')), json('null'), reference(parameters('workspaceResourceId'), '2021-12-01-preview').customerId)]"
+          }
+        }
+      },
+      {
+        "type": "Microsoft.Compute/virtualMachines/extensions",
+        "apiVersion": "2022-03-01",
+        "name": "[concat(parameters('vmName'), '/', variables('dependentAgentName'))]",
+        "location": "[parameters('location')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]",
+          "[resourceId('Microsoft.Compute/virtualMachines/extensions', parameters('vmName'), variables('monitorAgentName'))]"
+        ],
+        "properties": {
+          "publisher": "Microsoft.Azure.Monitoring.DependentAgent",
+          "type": "DependencyAgentWindows",
+          "typeHandlerVersion": "9.10",
+          "autoUpgradeMinorVersion": true
+        }
+      },
+      {
+        "type": "Microsoft.RecoveryServices/vaults",
+        "apiVersion": "2021-08-01",
+        "name": "[parameters('recoveryServicesVaultName')]",
+        "location": "[parameters('location')]",
+        "sku": {
+          "name": "RS0",
+          "tier": "Standard"
+        },
+        "properties": {}
+      },
+      {
+        "type": "Microsoft.Resources/deployments",
+        "apiVersion": "2021-04-01",
+        "name": "[concat(parameters('vmName'), '-BackupIntent')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]",
+          "[resourceId('Microsoft.RecoveryServices/vaults', parameters('recoveryServicesVaultName'))]"
+        ],
+        "properties": {
+          "mode": "Incremental",
+          "template": {
+            "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+            "contentVersion": "1.0.0.0",
+            "resources": [
+              {
+                "type": "Microsoft.RecoveryServices/vaults/backupFabrics/backupProtectionIntent",
+                "apiVersion": "2017-07-01",
+                "name": "[concat(parameters('recoveryServicesVaultName'), '/Azure/BackupIntent')]",
+                "properties": {
+                  "friendlyName": "[concat(parameters('vmName'), '-', 'BackupIntent')]",
+                  "protectionIntentItemType": "AzureResourceItem",
+                  "policyId": "[resourceId('Microsoft.RecoveryServices/vaults/backupPolicies', parameters('recoveryServicesVaultName'), parameters('backupPolicyName'))]",
+                  "sourceResourceId": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+                }
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "outputs": {
+      "shirId": {
+        "type": "string",
+        "value": "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), parameters('shirName'))]"
+      },
+      "vmId": {
+        "type": "string",
+        "value": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+      },
+      "nicId": {
+        "type": "string",
+        "value": "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]"
+      },
+      "backupIntentId": {
+        "type": "string",
+        "value": "[resourceId('Microsoft.RecoveryServices/vaults/backupFabrics/backupProtectionIntent', parameters('recoveryServicesVaultName'), 'Azure', 'BackupIntent')]"
+      }
+    }
+  }

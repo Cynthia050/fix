@@ -1,0 +1,206 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "dataFactoryName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Azure Data Factory"
+        }
+      },
+      "location": {
+        "type": "string",
+        "defaultValue": "UK South",
+        "metadata": {
+          "description": "Location for the Azure Data Factory"
+        }
+      },
+      "keyVaultName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the existing Key Vault"
+        }
+      },
+      "shirVmPasswordSecretName": {
+        "type": "string",
+        "defaultValue": "shir-vm-password",
+        "metadata": {
+          "description": "Name of the Key Vault Secret containing SHIR VM admin password"
+        }
+      },
+      "shirName": {
+        "type": "string",
+        "defaultValue": "ir10Prem",
+        "metadata": {
+          "description": "Name of the Self-Hosted Integration Runtime"
+        }
+      },
+      "shirNodeCount": {
+        "type": "int",
+        "defaultValue": 4,
+        "metadata": {
+          "description": "Number of nodes for Self-Hosted Integration Runtime"
+        }
+      },
+      "vmName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the VM for SHIR"
+        }
+      },
+      "vmSize": {
+        "type": "string",
+        "defaultValue": "Standard_D8s_v3",
+        "metadata": {
+          "description": "Size of the VM for SHIR"
+        }
+      },
+      "adminUsername": {
+        "type": "string",
+        "defaultValue": "shiradmin",
+        "metadata": {
+          "description": "Admin username for the SHIR VM"
+        }
+      },
+      "vnetResourceGroupName": {
+        "type": "string",
+        "defaultValue": "[resourceGroup().name]",
+        "metadata": {
+          "description": "Resource group name of the existing VNet"
+        }
+      },
+      "vnetName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the existing VNet"
+        }
+      },
+      "subnetName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the existing Subnet"
+        }
+      },
+      "privateDnsZoneName": {
+        "type": "string",
+        "defaultValue": "privatelink.datafactory.azure.net",
+        "metadata": {
+          "description": "Name of the private DNS zone"
+        }
+      },
+      "cmkKeyName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Key Vault key for customer-managed encryption"
+        }
+      },
+      "cmkKeyVersion": {
+        "type": "string",
+        "defaultValue": "",
+        "metadata": {
+          "description": "Version of the Key Vault key for customer-managed encryption (leave empty for latest)"
+        }
+      },
+      "concurrentJobsLimit": {
+        "type": "int",
+        "defaultValue": 24,
+        "metadata": {
+          "description": "Concurrent jobs limit for SHIR"
+        }
+      }
+    },
+    "variables": {
+      "keyVaultId": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+      "subnetId": "[resourceId(parameters('vnetResourceGroupName'), 'Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]",
+      "privateEndpointName": "[concat(parameters('dataFactoryName'), '-pe')]",
+      "privateLinkConnectionName": "[concat(parameters('dataFactoryName'), '-plc')]"
+    },
+    "resources": [
+      {
+        "type": "Microsoft.Resources/deployments",
+        "apiVersion": "2021-04-01",
+        "name": "dataFactoryDeployment",
+        "properties": {
+          "mode": "Incremental",
+          "templateLink": {
+            "relativePath": "adf.json"
+          },
+          "parameters": {
+            "dataFactoryName": { "value": "[parameters('dataFactoryName')]" },
+            "location": { "value": "[parameters('location')]" },
+            "keyVaultId": { "value": "[variables('keyVaultId')]" },
+            "cmkKeyName": { "value": "[parameters('cmkKeyName')]" },
+            "cmkKeyVersion": { "value": "[parameters('cmkKeyVersion')]" }
+          }
+        }
+      },
+      {
+        "type": "Microsoft.Resources/deployments",
+        "apiVersion": "2021-04-01",
+        "name": "privateEndpointDeployment",
+        "dependsOn": [
+          "dataFactoryDeployment"
+        ],
+        "properties": {
+          "mode": "Incremental",
+          "templateLink": {
+            "relativePath": "privateendpoint.json"
+          },
+          "parameters": {
+            "dataFactoryName": { "value": "[parameters('dataFactoryName')]" },
+            "location": { "value": "[parameters('location')]" },
+            "privateEndpointName": { "value": "[variables('privateEndpointName')]" },
+            "privateLinkConnectionName": { "value": "[variables('privateLinkConnectionName')]" },
+            "subnetId": { "value": "[variables('subnetId')]" },
+            "privateDnsZoneName": { "value": "[parameters('privateDnsZoneName')]" },
+            "vnetName": { "value": "[parameters('vnetName')]" },
+            "vnetResourceGroupName": { "value": "[parameters('vnetResourceGroupName')]" }
+          }
+        }
+      },
+      {
+        "type": "Microsoft.Resources/deployments",
+        "apiVersion": "2021-04-01",
+        "name": "shirDeployment",
+        "dependsOn": [
+          "dataFactoryDeployment"
+        ],
+        "properties": {
+          "mode": "Incremental",
+          "templateLink": {
+            "relativePath": "shir.json"
+          },
+          "parameters": {
+            "dataFactoryName": { "value": "[parameters('dataFactoryName')]" },
+            "location": { "value": "[parameters('location')]" },
+            "shirName": { "value": "[parameters('shirName')]" },
+            "vmName": { "value": "[parameters('vmName')]" },
+            "vmSize": { "value": "[parameters('vmSize')]" },
+            "subnetId": { "value": "[variables('subnetId')]" },
+            "adminUsername": { "value": "[parameters('adminUsername')]" },
+            "keyVaultName": { "value": "[parameters('keyVaultName')]" },
+            "shirVmPasswordSecretName": { "value": "[parameters('shirVmPasswordSecretName')]" },
+            "concurrentJobsLimit": { "value": "[parameters('concurrentJobsLimit')]" }
+          }
+        }
+      }
+    ],
+    "outputs": {
+      "dataFactoryId": {
+        "type": "string",
+        "value": "[reference('dataFactoryDeployment').outputs.dataFactoryId.value]"
+      },
+      "privateEndpointId": {
+        "type": "string",
+        "value": "[reference('privateEndpointDeployment').outputs.privateEndpointId.value]"
+      },
+      "shirId": {
+        "type": "string",
+        "value": "[reference('shirDeployment').outputs.shirId.value]"
+      },
+      "vmId": {
+        "type": "string",
+        "value": "[reference('shirDeployment').outputs.vmId.value]"
+      }
+    }
+  }

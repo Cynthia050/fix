@@ -1,0 +1,131 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "dataFactoryName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Azure Data Factory"
+        }
+      },
+      "location": {
+        "type": "string",
+        "metadata": {
+          "description": "Location for the Azure Data Factory"
+        }
+      },
+      "privateEndpointName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the private endpoint for ADF"
+        }
+      },
+      "privateLinkConnectionName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the private link connection"
+        }
+      },
+      "subnetId": {
+        "type": "string",
+        "metadata": {
+          "description": "Resource ID of the subnet"
+        }
+      },
+      "privateDnsZoneName": {
+        "type": "string",
+        "defaultValue": "privatelink.datafactory.azure.net",
+        "metadata": {
+          "description": "Name of the private DNS zone"
+        }
+      },
+      "vnetName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the VNet"
+        }
+      },
+      "vnetResourceGroupName": {
+        "type": "string",
+        "metadata": {
+          "description": "Resource group name of the VNet"
+        }
+      }
+    },
+    "variables": {
+      "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', parameters('privateDnsZoneName'))]",
+      "privateEndpointDnsGroupName": "[concat(parameters('privateEndpointName'), '/default')]",
+      "vnetId": "[resourceId(parameters('vnetResourceGroupName'), 'Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+    },
+    "resources": [
+      {
+        "type": "Microsoft.Network/privateDnsZones",
+        "apiVersion": "2020-06-01",
+        "name": "[parameters('privateDnsZoneName')]",
+        "location": "global",
+        "properties": {}
+      },
+      {
+        "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+        "apiVersion": "2020-06-01",
+        "name": "[concat(parameters('privateDnsZoneName'), '/', parameters('privateDnsZoneName'), '-link')]",
+        "location": "global",
+        "dependsOn": [
+          "[variables('privateDnsZoneId')]"
+        ],
+        "properties": {
+          "registrationEnabled": false,
+          "virtualNetwork": {
+            "id": "[variables('vnetId')]"
+          }
+        }
+      },
+      {
+        "type": "Microsoft.Network/privateEndpoints",
+        "apiVersion": "2021-05-01",
+        "name": "[parameters('privateEndpointName')]",
+        "location": "[parameters('location')]",
+        "properties": {
+          "subnet": {
+            "id": "[parameters('subnetId')]"
+          },
+          "privateLinkServiceConnections": [
+            {
+              "name": "[parameters('privateLinkConnectionName')]",
+              "properties": {
+                "privateLinkServiceId": "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]",
+                "groupIds": [
+                  "dataFactory"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+        "apiVersion": "2021-05-01",
+        "name": "[variables('privateEndpointDnsGroupName')]",
+        "dependsOn": [
+          "[parameters('privateEndpointName')]",
+          "[variables('privateDnsZoneId')]"
+        ],
+        "properties": {
+          "privateDnsZoneConfigs": [
+            {
+              "name": "config1",
+              "properties": {
+                "privateDnsZoneId": "[variables('privateDnsZoneId')]"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "outputs": {
+      "privateEndpointId": {
+        "type": "string",
+        "value": "[resourceId('Microsoft.Network/privateEndpoints', parameters('privateEndpointName'))]"
+      }
+    }
+  }

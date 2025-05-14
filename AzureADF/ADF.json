@@ -1,0 +1,112 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "dataFactoryName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Azure Data Factory"
+        }
+      },
+      "location": {
+        "type": "string",
+        "metadata": {
+          "description": "Location for the Azure Data Factory"
+        }
+      },
+      "keyVaultId": {
+        "type": "string",
+        "metadata": {
+          "description": "Resource ID of the Key Vault"
+        }
+      },
+      "cmkKeyName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the Key Vault key for customer-managed encryption"
+        }
+      },
+      "cmkKeyVersion": {
+        "type": "string",
+        "defaultValue": "",
+        "metadata": {
+          "description": "Version of the Key Vault key for customer-managed encryption (leave empty for latest)"
+        }
+      }
+    },
+    "variables": {
+      "keyVaultBaseUrl": "[reference(parameters('keyVaultId'), '2019-09-01').vaultUri]",
+      "keyUri": "[if(empty(parameters('cmkKeyVersion')), concat(variables('keyVaultBaseUrl'), 'keys/', parameters('cmkKeyName')), concat(variables('keyVaultBaseUrl'), 'keys/', parameters('cmkKeyName'), '/', parameters('cmkKeyVersion')))]"
+    },
+    "resources": [
+      {
+        "type": "Microsoft.DataFactory/factories",
+        "apiVersion": "2018-06-01",
+        "name": "[parameters('dataFactoryName')]",
+        "location": "[parameters('location')]",
+        "identity": {
+          "type": "SystemAssigned"
+        },
+        "properties": {
+          "encryption": {
+            "vaultBaseUrl": "[variables('keyVaultBaseUrl')]",
+            "keyName": "[parameters('cmkKeyName')]",
+            "keyVersion": "[parameters('cmkKeyVersion')]"
+          }
+        },
+        "resources": []
+      },
+      {
+        "type": "Microsoft.Resources/deployments",
+        "apiVersion": "2021-04-01",
+        "name": "keyVaultAccessPolicyDeployment",
+        "dependsOn": [
+          "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+        ],
+        "properties": {
+          "mode": "Incremental",
+          "template": {
+            "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+            "contentVersion": "1.0.0.0",
+            "resources": [
+              {
+                "type": "Microsoft.KeyVault/vaults/accessPolicies",
+                "apiVersion": "2019-09-01",
+                "name": "[concat(last(split(parameters('keyVaultId'), '/')), '/add')]",
+                "properties": {
+                  "accessPolicies": [
+                    {
+                      "tenantId": "[reference(resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName')), '2018-06-01', 'Full').identity.tenantId]",
+                      "objectId": "[reference(resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName')), '2018-06-01', 'Full').identity.principalId]",
+                      "permissions": {
+                        "keys": [
+                          "get",
+                          "unwrapKey",
+                          "wrapKey"
+                        ],
+                        "secrets": [
+                          "get",
+                          "list"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            "outputs": {}
+          }
+        }
+      }
+    ],
+    "outputs": {
+      "dataFactoryId": {
+        "type": "string",
+        "value": "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+      },
+      "dataFactoryPrincipalId": {
+        "type": "string",
+        "value": "[reference(resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName')), '2018-06-01', 'Full').identity.principalId]"
+      }
+    }
+  }

@@ -1,0 +1,113 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "vmName": {
+        "type": "string",
+        "metadata": {
+          "description": "Name of the VM"
+        }
+      },
+      "location": {
+        "type": "string",
+        "metadata": {
+          "description": "Location for the resources"
+        }
+      },
+      "subnetId": {
+        "type": "string",
+        "metadata": {
+          "description": "Resource ID of the subnet"
+        }
+      },
+      "privateIPAllocationMethod": {
+        "type": "string",
+        "defaultValue": "Dynamic",
+        "allowedValues": ["Dynamic", "Static"],
+        "metadata": {
+          "description": "IP allocation method for the private IP"
+        }
+      },
+      "privateIPAddress": {
+        "type": "string",
+        "defaultValue": "",
+        "metadata": {
+          "description": "Static private IP address (if allocation method is Static)"
+        }
+      },
+      "createPublicIP": {
+        "type": "bool",
+        "defaultValue": true,
+        "metadata": {
+          "description": "Whether to create a public IP address"
+        }
+      },
+      "publicIPAddressName": {
+        "type": "string",
+        "defaultValue": "",
+        "metadata": {
+          "description": "Name of the public IP address"
+        }
+      },
+      "tagsByResource": {
+        "type": "object",
+        "defaultValue": {},
+        "metadata": {
+          "description": "Tags for the resources"
+        }
+      }
+    },
+    "variables": {
+      "nicName": "[concat(parameters('vmName'), '-nic')]",
+      "actualPublicIPAddressName": "[if(empty(parameters('publicIPAddressName')), concat(parameters('vmName'), '-pip'), parameters('publicIPAddressName'))]"
+    },
+    "resources": [
+      {
+        "type": "Microsoft.Network/publicIPAddresses",
+        "apiVersion": "2021-05-01",
+        "name": "[variables('actualPublicIPAddressName')]",
+        "location": "[parameters('location')]",
+        "condition": "[parameters('createPublicIP')]",
+        "properties": {
+          "publicIPAllocationMethod": "Dynamic"
+        },
+        "tags": "[parameters('tagsByResource')]"
+      },
+      {
+        "type": "Microsoft.Network/networkInterfaces",
+        "apiVersion": "2021-05-01",
+        "name": "[variables('nicName')]",
+        "location": "[parameters('location')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.Network/publicIPAddresses', variables('actualPublicIPAddressName'))]"
+        ],
+        "properties": {
+          "ipConfigurations": [
+            {
+              "name": "ipconfig1",
+              "properties": {
+                "privateIPAllocationMethod": "[parameters('privateIPAllocationMethod')]",
+                "privateIPAddress": "[if(equals(parameters('privateIPAllocationMethod'), 'Static'), parameters('privateIPAddress'), json('null'))]",
+                "publicIPAddress": "[if(parameters('createPublicIP'), json(concat('{\"id\": \"', resourceId('Microsoft.Network/publicIPAddresses', variables('actualPublicIPAddressName')), '\"}')), json('null'))]",
+                "subnet": {
+                  "id": "[parameters('subnetId')]"
+                }
+              }
+            }
+          ],
+          "enableAcceleratedNetworking": true
+        },
+        "tags": "[parameters('tagsByResource')]"
+      }
+    ],
+    "outputs": {
+      "nicId": {
+        "type": "string",
+        "value": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+      },
+      "publicIpId": {
+        "type": "string",
+        "value": "[if(parameters('createPublicIP'), resourceId('Microsoft.Network/publicIPAddresses', variables('actualPublicIPAddressName')), '')]"
+      }
+    }
+  }

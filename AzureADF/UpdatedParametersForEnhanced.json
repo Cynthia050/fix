@@ -1,0 +1,70 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "dataFactoryName": {
+        "value": "test-ist-df-dev"
+      },
+      "location": {
+        "value": "UK South"
+      },
+      "keyVaultName": {
+        "value": "kv-adf-dev"
+      },
+      "shirVmPasswordSecretName": {
+        "value": "shir-vm-password"
+      },
+      "shirName": {
+        "value": "ir10Prem"
+      },
+      "shirNodeCount": {
+        "value": 4
+      },
+      "vmName": {
+        "value": "vm-shir-dev"
+      },
+      "vmSize": {
+        "value": "Standard_D8s_v3"
+      },
+      "adminUsername": {
+        "value": "shiradmin"
+      },
+      "vnetName": {
+        "value": "vnet-adf-dev"
+      },
+      "subnetName": {
+        "value": "subnet-adf"
+      },
+      "cmkKeyName": {
+        "value": "adf-cmk-dev"
+      },
+      "concurrentJobsLimit": {
+        "value": 24
+      },
+      "recoveryServicesVaultName": {
+        "value": "rsv-adf-dev"
+      },
+      "backupPolicyName": {
+        "value": "DefaultPolicy"
+      },
+      "diskEncryptionSetId": {
+        "value": ""
+      },
+      "existingStorageAccountId": {
+        "value": ""
+      },
+      "workspaceResourceId": {
+        "value": ""
+      },
+      "tagsByResource": {
+        "value": {
+          "Environment": "Development",
+          "Project": "ADF SHIR",
+          "Owner": ""
+        }
+      },
+      "osType": {
+        "value": "Windows"
+      }
+    }
+  }

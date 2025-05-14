@@ -1,0 +1,357 @@
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - templates/*
+    - scripts/*
+
+parameters:
+- name: environmentName
+  displayName: Environment
+  type: string
+  default: dev
+  values:
+  - dev
+  - test
+  - prod
+
+variables:
+  - group: ADF-${{ parameters.environmentName }}-Variables
+  - name: location
+    value: 'UK South'
+  - name: resourceGroupName
+    value: 'rg-adf-${{ parameters.environmentName }}'
+  - name: dataFactoryName
+    value: 'test-ist-df-${{ parameters.environmentName }}-datasync'
+  - name: vmName
+    value: 'vm-shir-${{ parameters.environmentName }}'
+  - name: shirName
+    value: 'ir10Prem'
+  - name: shirVmPasswordSecretName
+    value: 'shir-vm-password'
+  - name: cmkKeyName
+    value: 'adf-cmk-${{ parameters.environmentName }}'
+  - name: recoveryServicesVaultName
+    value: 'rsv-adf-${{ parameters.environmentName }}'
+  - name: backupPolicyName
+    value: 'DefaultPolicy'
+  - name: logAnalyticsWorkspaceName
+    value: 'law-adf-${{ parameters.environmentName }}'
+
+stages:
+- stage: Validate
+  displayName: 'Validate ARM Templates'
+  jobs:
+  - job: ValidateTemplates
+    displayName: 'Validate Templates'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: AzurePowerShell@5
+      displayName: 'Validate ARM Templates'
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        ScriptType: 'InlineScript'
+        Inline: |
+          $templateFile = "$(System.DefaultWorkingDirectory)/templates/azuredeploy.json"
+          $parameterFile = "$(System.DefaultWorkingDirectory)/templates/azuredeploy.parameters.${{ parameters.environmentName }}.json"
+          
+          # Validate the ARM template
+          Write-Host "Validating ARM template..."
+          $validation = Test-AzResourceGroupDeployment -ResourceGroupName "$(resourceGroupName)" `
+              -TemplateFile $templateFile `
+              -TemplateParameterFile $parameterFile `
+              -ErrorAction SilentlyContinue
+          
+          if ($validation) {
+            Write-Host "##vso[task.logissue type=error]ARM template validation failed:"
+            foreach ($error in $validation) {
+              Write-Host "##vso[task.logissue type=error]- $($error.Message)"
+            }
+            Write-Host "##vso[task.complete result=Failed;]ARM template validation failed."
+            exit 1
+          }
+          else {
+            Write-Host "ARM template validation succeeded."
+          }
+        azurePowerShellVersion: 'LatestVersion'
+
+- stage: PrepareKeyVault
+  displayName: 'Prepare Key Vault'
+  dependsOn: Validate
+  jobs:
+  - job: PrepareSecrets
+    displayName: 'Prepare Key Vault and Secrets'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: AzurePowerShell@5
+      displayName: 'Create/Verify Key Vault and Secrets'
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        ScriptType: 'FilePath'
+        ScriptPath: '$(System.DefaultWorkingDirectory)/scripts/Create-KeyVaultSecret.ps1'
+        ScriptArguments: '-KeyVaultName $(KeyVaultName) -SecretName $(shirVmPasswordSecretName)'
+        azurePowerShellVersion: 'LatestVersion'
+        
+    - task: AzurePowerShell@5
+      displayName: 'Create/Verify Customer-Managed Key'
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        ScriptType: 'InlineScript'
+        Inline: |
+          # Verify or create CMK key for encryption
+          $cmkKeyName = "$(cmkKeyName)"
+          $keyExists = Get-AzKeyVaultKey -VaultName "$(KeyVaultName)" -Name $cmkKeyName -ErrorAction SilentlyContinue
+          
+          if ($null -eq $keyExists) {
+            Write-Host "CMK key '$cmkKeyName' does not exist. Creating..."
+            $key = Add-AzKeyVaultKey -VaultName "$(KeyVaultName)" -Name $cmkKeyName -Destination Software
+            Write-Host "CMK key has been created successfully. Key ID: $($key.Id)"
+          }
+          else {
+            Write-Host "CMK key '$cmkKeyName' already exists in Key Vault. Using existing key."
+          }
+        azurePowerShellVersion: 'LatestVersion'
+
+- stage: CreateMonitoringResources
+  displayName: 'Create Monitoring Resources'
+  dependsOn: PrepareKeyVault
+  jobs:
+  - job: CreateLogAnalytics
+    displayName: 'Create Log Analytics Workspace'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Create Log Analytics Workspace'
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Check if Log Analytics workspace exists
+          workspace_exists=$(az monitor log-analytics workspace list --resource-group $(resourceGroupName) --query "[?name=='$(logAnalyticsWorkspaceName)']" --output tsv)
+          
+          if [ -z "$workspace_exists" ]; then
+            echo "Creating Log Analytics workspace $(logAnalyticsWorkspaceName)"
+            az monitor log-analytics workspace create \
+              --resource-group $(resourceGroupName) \
+              --workspace-name $(logAnalyticsWorkspaceName) \
+              --location $(location) \
+              --sku PerGB2018
+          else
+            echo "Log Analytics workspace $(logAnalyticsWorkspaceName) already exists"
+          fi
+          
+          # Get workspace resource ID for use in deployment
+          workspace_id=$(az monitor log-analytics workspace show --resource-group $(resourceGroupName) --workspace-name $(logAnalyticsWorkspaceName) --query id -o tsv)
+          echo "##vso[task.setvariable variable=workspaceResourceId;isOutput=true]$workspace_id"
+
+- stage: CreateBackupResources
+  displayName: 'Create Backup Resources'
+  dependsOn: PrepareKeyVault
+  jobs:
+  - job: CreateBackupVault
+    displayName: 'Create Recovery Services Vault'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Create Recovery Services Vault'
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Check if Recovery Services vault exists
+          vault_exists=$(az backup vault list --resource-group $(resourceGroupName) --query "[?name=='$(recoveryServicesVaultName)']" --output tsv)
+          
+          if [ -z "$vault_exists" ]; then
+            echo "Creating Recovery Services vault $(recoveryServicesVaultName)"
+            az backup vault create \
+              --resource-group $(resourceGroupName) \
+              --name $(recoveryServicesVaultName) \
+              --location $(location)
+          else
+            echo "Recovery Services vault $(recoveryServicesVaultName) already exists"
+          fi
+          
+          # Create/verify backup policy exists
+          policy_exists=$(az backup policy list --resource-group $(resourceGroupName) --vault-name $(recoveryServicesVaultName) --query "[?name=='$(backupPolicyName)']" --output tsv)
+          
+          if [ -z "$policy_exists" ]; then
+            echo "Creating backup policy $(backupPolicyName)"
+            az backup policy create \
+              --resource-group $(resourceGroupName) \
+              --vault-name $(recoveryServicesVaultName) \
+              --name $(backupPolicyName) \
+              --policy @$(System.DefaultWorkingDirectory)/templates/backup-policy.json
+          else
+            echo "Backup policy $(backupPolicyName) already exists"
+          fi
+
+- stage: DeployInfrastructure
+  displayName: 'Deploy Infrastructure'
+  dependsOn: 
+  - CreateMonitoringResources
+  - CreateBackupResources
+  jobs:
+  - job: DeployADF
+    displayName: 'Deploy ADF & Components'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: AzureKeyVault@2
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        KeyVaultName: '$(KeyVaultName)'
+        SecretsFilter: '*'
+        RunAsPreJob: true
+    
+    - task: AzureResourceManagerTemplateDeployment@3
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: '$(ServiceConnection)'
+        subscriptionId: '$(SubscriptionId)'
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(resourceGroupName)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: '$(System.DefaultWorkingDirectory)/templates/azuredeploy.json'
+        csmParametersFile: '$(System.DefaultWorkingDirectory)/templates/azuredeploy.parameters.${{ parameters.environmentName }}.json'
+        deploymentMode: 'Incremental'
+        deploymentName: 'ADF-Deployment-$(Build.BuildNumber)'
+        overrideParameters: |
+          -dataFactoryName "$(dataFactoryName)" 
+          -location "$(location)" 
+          -keyVaultName "$(KeyVaultName)" 
+          -shirVmPasswordSecretName "$(shirVmPasswordSecretName)" 
+          -shirName "$(shirName)" 
+          -vmName "$(vmName)" 
+          -cmkKeyName "$(cmkKeyName)"
+          -recoveryServicesVaultName "$(recoveryServicesVaultName)"
+          -backupPolicyName "$(backupPolicyName)"
+          -workspaceResourceId "$(workspaceResourceId)"
+    
+  - job: ConfigureSHIR
+    displayName: 'Configure Self-Hosted Integration Runtime'
+    dependsOn: DeployADF
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: AzurePowerShell@5
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        ScriptType: 'FilePath'
+        ScriptPath: '$(System.DefaultWorkingDirectory)/scripts/Configure-SHIR.ps1'
+        ScriptArguments: '-ResourceGroupName $(resourceGroupName) -DataFactoryName $(dataFactoryName) -IntegrationRuntimeName $(shirName) -VMName $(vmName)'
+        azurePowerShellVersion: 'LatestVersion'
+
+  - job: ConfigureNetworkRules
+    displayName: 'Configure Network Security Rules'
+    dependsOn: DeployADF
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: AzurePowerShell@5
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        ScriptType: 'InlineScript'
+        Inline: |
+          # Get NSG
+          $nsgName = "$(vmName)-nsg"
+          $nsg = Get-AzNetworkSecurityGroup -ResourceGroupName $(resourceGroupName) -Name $nsgName -ErrorAction SilentlyContinue
+          
+          if ($null -ne $nsg) {
+            # Add rules to allow traffic from ADF to ADLS Gen2
+            $nsgRule = $nsg.SecurityRules | Where-Object { $_.Name -eq "ADF-to-ADLS-Gen2" } -ErrorAction SilentlyContinue
+            if ($null -eq $nsgRule) {
+              Write-Host "Adding NSG rule for ADF to ADLS Gen2 connection..."
+              $nsg = Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg -Name "ADF-to-ADLS-Gen2" `
+                -Description "Allow traffic from ADF to ADLS Gen2" `
+                -Access Allow -Protocol Tcp -Direction Outbound -Priority 1050 `
+                -SourceAddressPrefix VirtualNetwork -SourcePortRange * `
+                -DestinationAddressPrefix Storage -DestinationPortRange 443
+              
+              # Update the NSG with the new rule
+              $nsg | Set-AzNetworkSecurityGroup
+            }
+            
+            # Add rules to allow traffic from ADF to Azure SQL
+            $nsgRule = $nsg.SecurityRules | Where-Object { $_.Name -eq "ADF-to-SQL" } -ErrorAction SilentlyContinue
+            if ($null -eq $nsgRule) {
+              Write-Host "Adding NSG rule for ADF to Azure SQL connection..."
+              $nsg = Add-AzNetworkSecurityRuleConfig -NetworkSecurityGroup $nsg -Name "ADF-to-SQL" `
+                -Description "Allow traffic from ADF to Azure SQL" `
+                -Access Allow -Protocol Tcp -Direction Outbound -Priority 1060 `
+                -SourceAddressPrefix VirtualNetwork -SourcePortRange * `
+                -DestinationAddressPrefix Sql -DestinationPortRange 1433
+              
+              # Update the NSG with the new rule
+              $nsg | Set-AzNetworkSecurityGroup
+            }
+          }
+          else {
+            Write-Error "NSG '$nsgName' not found"
+          }
+        azurePowerShellVersion: 'LatestVersion'
+
+- stage: Verification
+  displayName: 'Verify Deployment'
+  dependsOn: DeployInfrastructure
+  jobs:
+  - job: VerifyResources
+    displayName: 'Verify All Resources'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: AzurePowerShell@5
+      inputs:
+        azureSubscription: '$(ServiceConnection)'
+        ScriptType: 'InlineScript'
+        Inline: |
+          # Verify ADF deployment
+          $adf = Get-AzDataFactoryV2 -ResourceGroupName $(resourceGroupName) -Name $(dataFactoryName) -ErrorAction SilentlyContinue
+          if ($null -eq $adf) {
+            Write-Error "Azure Data Factory '$(dataFactoryName)' not found"
+          } else {
+            Write-Host "Azure Data Factory '$(dataFactoryName)' deployed successfully"
+          }
+          
+          # Verify SHIR status
+          $shir = Get-AzDataFactoryV2IntegrationRuntime -ResourceGroupName $(resourceGroupName) -DataFactoryName $(dataFactoryName) -Name $(shirName) -ErrorAction SilentlyContinue
+          if ($null -eq $shir) {
+            Write-Error "Self-Hosted Integration Runtime '$(shirName)' not found"
+          } else {
+            Write-Host "Self-Hosted Integration Runtime '$(shirName)' deployed successfully"
+            $shirStatus = Get-AzDataFactoryV2IntegrationRuntimeStatus -ResourceGroupName $(resourceGroupName) -DataFactoryName $(dataFactoryName) -Name $(shirName)
+            Write-Host "Self-Hosted Integration Runtime status: $($shirStatus.State)"
+          }
+          
+          # Verify VM deployment
+          $vm = Get-AzVM -ResourceGroupName $(resourceGroupName) -Name $(vmName) -ErrorAction SilentlyContinue
+          if ($null -eq $vm) {
+            Write-Error "VM '$(vmName)' not found"
+          } else {
+            Write-Host "VM '$(vmName)' deployed successfully"
+          }
+          
+          # Verify private endpoint
+          $pe = Get-AzPrivateEndpoint -ResourceGroupName $(resourceGroupName) | Where-Object { $_.PrivateLinkServiceConnections.PrivateLinkServiceId -like "*$(dataFactoryName)*" }
+          if ($null -eq $pe) {
+            Write-Error "Private endpoint for Azure Data Factory not found"
+          } else {
+            Write-Host "Private endpoint '$($pe.Name)' for Azure Data Factory deployed successfully"
+          }
+          
+          # Verify backup configuration
+          $backupItem = Get-AzRecoveryServicesBackupItem -BackupManagementType AzureVM -WorkloadType AzureVM -VaultId "/subscriptions/$(SubscriptionId)/resourceGroups/$(resourceGroupName)/providers/Microsoft.RecoveryServices/vaults/$(recoveryServicesVaultName)" -ErrorAction SilentlyContinue
+          if ($backupItem.Count -eq 0) {
+            Write-Warning "No backup items found for VM '$(vmName)'. This is expected if the deployment just completed. Backup will be configured in the background."
+          } else {
+            Write-Host "Backup configuration for VM '$(vmName)' verified. Found $($backupItem.Count) backup items."
+          }
+        azurePowerShellVersion: 'LatestVersion'
