@@ -1,0 +1,818 @@
+Azure Data Factory with Private Endpoints - Automation Solution
+This solution provides a complete infrastructure-as-code approach for deploying Azure Data Factory with private endpoints, self-hosted integration runtimes, and associated VMs - all secured internally without public internet exposure.
+
+Directory Structure
+deployment/
+├── azure-pipelines.yml
+├── arm-templates/
+│   ├── main.json                        # Main deployment template
+│   ├── parameters.json                  # Environment parameters
+│   ├── keyvault-secrets.json            # Template for creating KeyVault secrets
+│   ├── modules/
+│   │   ├── data-factory.json            # Data Factory deployment
+│   │   ├── private-endpoint.json        # Private endpoint configuration
+│   │   ├── ir-vms.json                  # Self-hosted IR VMs
+│   │   ├── networking.json              # Networking components
+│   │   └── vm-extensions.json           # VM extensions for IR installation
+│   └── scripts/
+│       └── install-ir.ps1               # PowerShell script for IR installation
+└── scripts/
+    └── create-keyvault-secrets.ps1      # Script to create KeyVault secrets
+Main Template (main.json)
+json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "input-CustomerCode": {
+      "type": "string",
+      "metadata": {
+        "description": "Customer code"
+      }
+    },
+    "input-EnvironmentCode": {
+      "type": "string",
+      "metadata": {
+        "description": "Environment code (e.g., dev, test, prod)"
+      },
+      "defaultValue": "dev"
+    },
+    "dataFactoryName": {
+      "type": "string",
+      "defaultValue": "[concat('hsl-az-df-', parameters('input-EnvironmentCode'), '-D')]"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "uksouth"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "defaultValue": "[concat('kv-', parameters('input-CustomerCode'), '-', parameters('input-EnvironmentCode'))]"
+    },
+    "existingKeyVaultResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the existing Key Vault"
+      }
+    },
+    "existingUMIResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the existing user-managed identity"
+      }
+    },
+    "existingStorageAccountResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the existing storage account"
+      }
+    },
+    "subnetName": {
+      "type": "string",
+      "defaultValue": "snet-D"
+    },
+    "subnetResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the subnet for private endpoints"
+      }
+    },
+    "vmAdminUsername": {
+      "type": "string",
+      "defaultValue": "vmadmin"
+    },
+    "integrationRuntimeName": {
+      "type": "string",
+      "defaultValue": "SelfHostedIntegrationRuntime"
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_D4s_v3",
+      "metadata": {
+        "description": "Size of the VM for self-hosted IR"
+      }
+    },
+    "vmCount": {
+      "type": "int",
+      "defaultValue": 4,
+      "metadata": {
+        "description": "Number of VMs to create for self-hosted IR"
+      }
+    },
+    "tagsByResource": {
+      "type": "object",
+      "defaultValue": {
+        "default": {
+          "Project": "AzureDataFactory",
+          "Environment": "[parameters('input-EnvironmentCode')]",
+          "Service": "BST"
+        }
+      }
+    }
+  },
+  "variables": {
+    "privateEndpointName": "[concat(parameters('dataFactoryName'), '-pe')]",
+    "storageAccountName": "[concat('st', parameters('input-CustomerCode'), parameters('input-EnvironmentCode'), 'D')]",
+    "vmBaseName": "[concat('vm-dmir', parameters('input-EnvironmentCode'))]",
+    "nicBaseName": "[concat('nic-dmir', parameters('input-EnvironmentCode'))]",
+    "osDiskBaseName": "[concat('osdisk-dmir', parameters('input-EnvironmentCode'))]",
+    "vmAdminPasswordSecretName": "irvm-adminpassword",
+    "dataFactoryPrivateLinkServiceName": "dataFactory"
+  },
+  "resources": [
+    {
+      "name": "keyVaultSecretDeployment",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2021-04-01",
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "keyVaultName": { "type": "string" },
+            "vmAdminPasswordSecretName": { "type": "string" }
+          },
+          "variables": {
+            "vmAdminPassword": "[concat('K', uniqueString(resourceGroup().id, deployment().name), 'x', '!')]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.KeyVault/vaults/secrets",
+              "apiVersion": "2021-06-01-preview",
+              "name": "[concat(parameters('keyVaultName'), '/', parameters('vmAdminPasswordSecretName'))]",
+              "properties": {
+                "value": "[variables('vmAdminPassword')]"
+              }
+            }
+          ],
+          "outputs": {
+            "secretUri": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), parameters('vmAdminPasswordSecretName')), '2021-06-01-preview').secretUri]"
+            },
+            "secretName": {
+              "type": "string",
+              "value": "[parameters('vmAdminPasswordSecretName')]"
+            }
+          }
+        },
+        "parameters": {
+          "keyVaultName": { "value": "[parameters('keyVaultName')]" },
+          "vmAdminPasswordSecretName": { "value": "[variables('vmAdminPasswordSecretName')]" }
+        }
+      }
+    },
+    {
+      "name": "dataFactoryDeployment",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2021-04-01",
+      "properties": {
+        "mode": "Incremental",
+        "templateLink": {
+          "relativePath": "modules/data-factory.json"
+        },
+        "parameters": {
+          "dataFactoryName": { "value": "[parameters('dataFactoryName')]" },
+          "location": { "value": "[parameters('location')]" },
+          "managedIdentityResourceId": { "value": "[parameters('existingUMIResourceId')]" },
+          "keyVaultResourceId": { "value": "[parameters('existingKeyVaultResourceId')]" },
+          "tags": { "value": "[parameters('tagsByResource').default]" }
+        }
+      }
+    },
+    {
+      "name": "privateEndpointDeployment",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2021-04-01",
+      "dependsOn": [
+        "dataFactoryDeployment"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "templateLink": {
+          "relativePath": "modules/private-endpoint.json"
+        },
+        "parameters": {
+          "privateEndpointName": { "value": "[variables('privateEndpointName')]" },
+          "location": { "value": "[parameters('location')]" },
+          "subnetResourceId": { "value": "[parameters('subnetResourceId')]" },
+          "privateLinkServiceId": { "value": "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]" },
+          "groupId": { "value": "[variables('dataFactoryPrivateLinkServiceName')]" },
+          "tags": { "value": "[parameters('tagsByResource').default]" }
+        }
+      }
+    },
+    {
+      "name": "selfHostedIRDeployment",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2021-04-01",
+      "dependsOn": [
+        "dataFactoryDeployment"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "resources": [
+            {
+              "name": "[concat(parameters('dataFactoryName'), '/', parameters('integrationRuntimeName'))]",
+              "type": "Microsoft.DataFactory/factories/integrationRuntimes",
+              "apiVersion": "2018-06-01",
+              "properties": {
+                "type": "SelfHosted",
+                "description": "Self-Hosted Integration Runtime for on-premises data access",
+                "typeProperties": {}
+              }
+            }
+          ],
+          "outputs": {
+            "authKey": {
+              "type": "string",
+              "value": "[listAuthKeys(resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('dataFactoryName'), parameters('integrationRuntimeName')), '2018-06-01').authKey1]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "irVMsDeployment",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2021-04-01",
+      "dependsOn": [
+        "keyVaultSecretDeployment",
+        "selfHostedIRDeployment"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "templateLink": {
+          "relativePath": "modules/ir-vms.json"
+        },
+        "parameters": {
+          "location": { "value": "[parameters('location')]" },
+          "vmBaseName": { "value": "[variables('vmBaseName')]" },
+          "nicBaseName": { "value": "[variables('nicBaseName')]" },
+          "osDiskBaseName": { "value": "[variables('osDiskBaseName')]" },
+          "vmCount": { "value": "[parameters('vmCount')]" },
+          "vmSize": { "value": "[parameters('vmSize')]" },
+          "subnetResourceId": { "value": "[parameters('subnetResourceId')]" },
+          "adminUsername": { "value": "[parameters('vmAdminUsername')]" },
+          "keyVaultName": { "value": "[parameters('keyVaultName')]" },
+          "adminPasswordSecretName": { "value": "[variables('vmAdminPasswordSecretName')]" },
+          "tags": { "value": "[parameters('tagsByResource').default]" },
+          "integrationRuntimeName": { "value": "[parameters('integrationRuntimeName')]" },
+          "dataFactoryName": { "value": "[parameters('dataFactoryName')]" },
+          "integrationRuntimeKey": { "value": "[reference('selfHostedIRDeployment').outputs.authKey.value]" }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "dataFactoryId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+    },
+    "privateEndpointId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Network/privateEndpoints', variables('privateEndpointName'))]"
+    },
+    "vmAdminPasswordSecretUri": {
+      "type": "string",
+      "value": "[reference('keyVaultSecretDeployment').outputs.secretUri.value]"
+    }
+  }
+}
+Data Factory Module (modules/data-factory.json)
+json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "dataFactoryName": {
+      "type": "string"
+    },
+    "location": {
+      "type": "string"
+    },
+    "managedIdentityResourceId": {
+      "type": "string"
+    },
+    "keyVaultResourceId": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "object"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.DataFactory/factories",
+      "apiVersion": "2018-06-01",
+      "name": "[parameters('dataFactoryName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[parameters('managedIdentityResourceId')]": {}
+        }
+      },
+      "properties": {
+        "publicNetworkAccess": "Disabled",
+        "encryption": {
+          "vaultBaseUrl": "[reference(parameters('keyVaultResourceId'), '2021-06-01-preview', 'Full').properties.vaultUri]",
+          "keyName": "dataFactoryKey",
+          "identity": {
+            "userAssignedIdentity": "[parameters('managedIdentityResourceId')]"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "dataFactoryId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.DataFactory/factories', parameters('dataFactoryName'))]"
+    }
+  }
+}
+Private Endpoint Module (modules/private-endpoint.json)
+json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "privateEndpointName": {
+      "type": "string"
+    },
+    "location": {
+      "type": "string"
+    },
+    "subnetResourceId": {
+      "type": "string"
+    },
+    "privateLinkServiceId": {
+      "type": "string"
+    },
+    "groupId": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "object"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2021-05-01",
+      "name": "[parameters('privateEndpointName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "subnet": {
+          "id": "[parameters('subnetResourceId')]"
+        },
+        "privateLinkServiceConnections": [
+          {
+            "name": "[parameters('privateEndpointName')]",
+            "properties": {
+              "privateLinkServiceId": "[parameters('privateLinkServiceId')]",
+              "groupIds": [
+                "[parameters('groupId')]"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2021-05-01",
+      "name": "[concat(parameters('privateEndpointName'), '/default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', parameters('privateEndpointName'))]"
+      ],
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "privatelink-datafactory",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.datafactory.azure.net')]"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
+Integration Runtime VMs Module (modules/ir-vms.json)
+json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "type": "string"
+    },
+    "vmBaseName": {
+      "type": "string"
+    },
+    "nicBaseName": {
+      "type": "string"
+    },
+    "osDiskBaseName": {
+      "type": "string"
+    },
+    "vmCount": {
+      "type": "int"
+    },
+    "vmSize": {
+      "type": "string"
+    },
+    "subnetResourceId": {
+      "type": "string"
+    },
+    "adminUsername": {
+      "type": "string"
+    },
+    "keyVaultName": {
+      "type": "string"
+    },
+    "adminPasswordSecretName": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "object"
+    },
+    "integrationRuntimeName": {
+      "type": "string"
+    },
+    "dataFactoryName": {
+      "type": "string"
+    },
+    "integrationRuntimeKey": {
+      "type": "securestring"
+    }
+  },
+  "variables": {
+    "keyVaultResourceId": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2021-03-01",
+      "name": "[concat(parameters('nicBaseName'), '-', copyIndex(1))]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "copy": {
+        "name": "nicCopy",
+        "count": "[parameters('vmCount')]"
+      },
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "subnet": {
+                "id": "[parameters('subnetResourceId')]"
+              },
+              "privateIPAllocationMethod": "Dynamic"
+            }
+          }
+        ],
+        "enableAcceleratedNetworking": true
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2021-07-01",
+      "name": "[concat(parameters('vmBaseName'), '-', copyIndex(1))]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "copy": {
+        "name": "vmCopy",
+        "count": "[parameters('vmCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', concat(parameters('nicBaseName'), '-', copyIndex(1)))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "storageProfile": {
+          "osDisk": {
+            "name": "[concat(parameters('osDiskBaseName'), '-', copyIndex(1))]",
+            "createOption": "FromImage",
+            "managedDisk": {
+              "storageAccountType": "Premium_LRS"
+            },
+            "diskSizeGB": 128
+          },
+          "imageReference": {
+            "publisher": "MicrosoftWindowsServer",
+            "offer": "WindowsServer",
+            "sku": "2019-Datacenter",
+            "version": "latest"
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(parameters('nicBaseName'), '-', copyIndex(1)))]"
+            }
+          ]
+        },
+        "osProfile": {
+          "computerName": "[concat(parameters('vmBaseName'), '-', copyIndex(1))]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[reference(variables('keyVaultResourceId'), '2021-06-01-preview').properties.vaultUri]secrets/[parameters('adminPasswordSecretName')]"
+        },
+        "diagnosticsProfile": {
+          "bootDiagnostics": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2021-07-01",
+      "name": "[concat(parameters('vmBaseName'), '-', copyIndex(1), '/InstallIR')]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "vmExtensionCopy",
+        "count": "[parameters('vmCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', concat(parameters('vmBaseName'), '-', copyIndex(1)))]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Compute",
+        "type": "CustomScriptExtension",
+        "typeHandlerVersion": "1.10",
+        "autoUpgradeMinorVersion": true,
+        "protectedSettings": {
+          "commandToExecute": "[concat('powershell -ExecutionPolicy Unrestricted -File install-ir.ps1 -AuthKey \"', parameters('integrationRuntimeKey'), '\" -NodeName \"', concat(parameters('vmBaseName'), '-', copyIndex(1)), '\"')]",
+          "fileUris": [
+            "[uri(deployment().properties.templateLink.uri, '../scripts/install-ir.ps1')]"
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2021-07-01",
+      "name": "[concat(parameters('vmBaseName'), '-', copyIndex(1), '/AzureMonitorWindowsAgent')]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "monitoringExtensionCopy",
+        "count": "[parameters('vmCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', concat(parameters('vmBaseName'), '-', copyIndex(1)))]",
+        "[resourceId('Microsoft.Compute/virtualMachines/extensions', concat(parameters('vmBaseName'), '-', copyIndex(1)), 'InstallIR')]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Azure.Monitor",
+        "type": "AzureMonitorWindowsAgent",
+        "typeHandlerVersion": "1.0",
+        "autoUpgradeMinorVersion": true,
+        "enableAutomaticUpgrade": true
+      }
+    }
+  ]
+}
+Install IR PowerShell Script (scripts/install-ir.ps1)
+powershell
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$AuthKey,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$NodeName
+)
+
+# Set TLS to 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Download the IR installer
+$installerPath = "$env:TEMP\IntegrationRuntime.msi"
+Invoke-WebRequest -Uri "https://aka.ms/dmg" -OutFile $installerPath
+
+# Install the IR silently
+Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", $installerPath, "/quiet" -Wait
+
+# Wait for the service to be available
+$timeout = New-TimeSpan -Minutes 5
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$serviceInstalled = $false
+
+while (-not $serviceInstalled -and $stopwatch.Elapsed -lt $timeout) {
+    try {
+        $service = Get-Service -Name "DIAHostService" -ErrorAction SilentlyContinue
+        if ($service -ne $null) {
+            $serviceInstalled = $true
+        }
+        else {
+            Write-Output "Waiting for DIAHostService to be installed..."
+            Start-Sleep -Seconds 10
+        }
+    }
+    catch {
+        Write-Output "Error checking service status: $_"
+        Start-Sleep -Seconds 10
+    }
+}
+
+if (-not $serviceInstalled) {
+    throw "Integration Runtime service was not installed within the timeout period."
+}
+
+# Register the IR with the key
+$dmgPath = "C:\Program Files\Microsoft Integration Runtime\4.0\Shared\dmgcmd.exe"
+& $dmgPath -RegisterNewNode $AuthKey $NodeName
+
+# Enable concurrent job limit to 24
+$timeout = New-TimeSpan -Minutes 2
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$configUpdated = $false
+
+while (-not $configUpdated -and $stopwatch.Elapsed -lt $timeout) {
+    try {
+        # Update the IRs with proper concurrency settings
+        & $dmgPath -EnableConcurrentJobsLimit 24
+        $configUpdated = $true
+    }
+    catch {
+        Write-Output "Error setting concurrent job limit: $_"
+        Start-Sleep -Seconds 5
+    }
+}
+
+if (-not $configUpdated) {
+    Write-Warning "Could not set concurrent job limit within the timeout period."
+}
+
+Write-Output "Integration Runtime installation and configuration complete."
+Azure DevOps Pipeline (azure-pipelines.yml)
+yaml
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - deployment/**
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - name: resourceGroupName
+    value: 'rg-D-dev'
+  - name: location
+    value: 'uksouth'
+  - name: customerCode
+    value: 'ibd'
+  - name: environmentCode
+    value: 'dev'
+  - name: templateFilePath
+    value: '$(Build.SourcesDirectory)/deployment/arm-templates/main.json'
+  - name: parametersFilePath
+    value: '$(Build.SourcesDirectory)/deployment/arm-templates/parameters.json'
+
+stages:
+- stage: ValidateTemplates
+  displayName: 'Validate ARM Templates'
+  jobs:
+  - job: ValidateARMTemplates
+    displayName: 'Validate ARM Templates'
+    steps:
+    - task: AzurePowerShell@5
+      displayName: 'Validate ARM Template'
+      inputs:
+        azureSubscription: 'YourServiceConnection'
+        ScriptType: 'InlineScript'
+        Inline: |
+          $validation = Test-AzResourceGroupDeployment -ResourceGroupName $(resourceGroupName) -TemplateFile "$(templateFilePath)" -TemplateParameterFile "$(parametersFilePath)"
+          if ($validation) {
+            Write-Error "Template validation failed: $validation"
+            exit 1
+          }
+        azurePowerShellVersion: 'LatestVersion'
+
+- stage: DeployInfrastructure
+  displayName: 'Deploy Infrastructure'
+  dependsOn: ValidateTemplates
+  jobs:
+  - job: DeployARMTemplates
+    displayName: 'Deploy ARM Templates'
+    steps:
+    - task: AzureKeyVault@2
+      displayName: 'Get Azure KeyVault Secrets'
+      inputs:
+        azureSubscription: 'YourServiceConnection'
+        KeyVaultName: 'kv-$(customerCode)-$(environmentCode)'
+        SecretsFilter: '*'
+        RunAsPreJob: true
+
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: 'Deploy ARM Template'
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: 'YourServiceConnection'
+        subscriptionId: 'YourSubscriptionId'
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(resourceGroupName)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: '$(templateFilePath)'
+        csmParametersFile: '$(parametersFilePath)'
+        deploymentMode: 'Incremental'
+        deploymentOutputs: 'deploymentOutputs'
+
+    - task: PowerShell@2
+      displayName: 'Process Deployment Outputs'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $outputs = '$(deploymentOutputs)' | ConvertFrom-Json
+          foreach ($output in $outputs.PSObject.Properties) {
+            Write-Host "##vso[task.setvariable variable=$($output.Name);isOutput=true]$($output.Value.value)"
+            Write-Host "$($output.Name): $($output.Value.value)"
+          }
+        pwsh: true
+Parameters File (parameters.json)
+json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "input-CustomerCode": {
+      "value": "iaz"
+    },
+    "input-EnvironmentCode": {
+      "value": "dev"
+    },
+    "location": {
+      "value": "uksouth"
+    },
+    "existingKeyVaultResourceId": {
+      "value": "/subscriptions/{subscriptionId}/resourceGroups/rg-D-dev/providers/Microsoft.KeyVault/vaults/kv"
+    },
+    "existingUMIResourceId": {
+      "value": "/subscriptions/{subscriptionId}/resourceGroups/rg-D-dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-iaz-"
+    },
+    "existingStorageAccountResourceId": {
+      "value": "/subscriptions/{subscriptionId}/resourceGroups/rg-D-dev/providers/Microsoft.Storage/storageAccounts/stiazdevD"
+    },
+    "subnetResourceId": {
+      "value": "/subscriptions/{subscriptionId}/resourceGroups/rg-data-dev/providers/Microsoft.Network/virtualNetworks/vnet-iaz-dev/subnets/snet-D"
+    },
+    "vmAdminUsername": {
+      "value": "vmadmin"
+    },
+    "vmCount": {
+      "value": 4
+    }
+  }
+}
+KeyVault Secret Creation Script
+powershell
+# Create a strong password and store it in KeyVault
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$KeyVaultName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$SecretName,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$ManualPassword
+)
+
+# If no manual password is provided, generate a strong one
+if ([string]::IsNullOrEmpty($ManualPassword)) {
+    # Generate a complex password
+    $length = 16
+    $nonAlphaChars = 5
+    $password = [System.Web.Security.Membership]::GeneratePassword($length, $nonAlphaChars)
+    
+    # Make sure it meets complexity requirements
+    $password = $password + "Az9!"
+} else {
+    $password = $ManualPassword
+}
+
+# Convert to secure string
+$securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+
+# Store in KeyVault
+Set-AzKeyVaultSecret -VaultName $KeyVaultName -Name $SecretName -SecretValue $securePassword
+
+Write-Output "Password stored in KeyVault '$KeyVaultName' with name '$SecretName'"
