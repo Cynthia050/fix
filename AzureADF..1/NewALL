@@ -958,6 +958,89 @@ Deploy with Dynamic Parameters
     azurePowerShellVersion: 'LatestVersion'
 
 
+    The Problem
+    The Azure DevOps pipeline's service principal doesn't have permissions to upload to your storage account. Here are three ways to fix this:
+
+    Option 2: Use a Storage Account Key
+    If you can't modify permissions, use a storage account key:
+
+    - task: AzurePowerShell@5
+  displayName: 'Upload Script to Storage'
+  inputs:
+    azureSubscription: 'YourServiceConnection'
+    ScriptType: 'InlineScript'
+    Inline: |
+      # Get storage account key instead of using context from Get-AzStorageAccount
+      $storageAccount = ""
+      $resourceGroup = ""
+      
+      # Get the storage account key directly
+      $storageKey = (Get-AzStorageAccountKey -ResourceGroupName $resourceGroup -Name $storageAccount)[0].Value
+      
+      # Create context with key
+      $ctx = New-AzStorageContext -StorageAccountName $storageAccount -StorageAccountKey $storageKey
+      
+      # Create container
+      New-AzStorageContainer -Name "scripts" -Context $ctx -Permission Off -ErrorAction SilentlyContinue
+      
+      # Upload script
+      Set-AzStorageBlobContent -File "$(Build.SourcesDirectory)/install-ir.ps1" -Container "scripts" -Blob "install-ir.ps1" -Context $ctx -Force
+      
+      # Generate SAS token
+      $startTime = Get-Date
+      $endTime = $startTime.AddHours(24)
+      $sasToken = New-AzStorageBlobSASToken -Container "scripts" -Blob "install-ir.ps1" -Permission r -StartTime $startTime -ExpiryTime $endTime -Context $ctx
+      
+      # Set variable
+      Write-Host "##vso[task.setvariable variable=scriptSasUrl]https://$storageAccount.blob.core.windows.net/scripts/install-ir.ps1$sasToken"
+    azurePowerShellVersion: 'LatestVersion'
+
+    Option 3: Embed Script in ARM Template (Simplest)
+    Avoid storage account usage entirely by encoding the script directly in your pipeline:
+
+    - task: PowerShell@2
+    displayName: 'Encode Script'
+    inputs:
+      targetType: 'inline'
+      script: |
+        # Read script content
+        $scriptPath = "$(Build.SourcesDirectory)/install-ir.ps1"
+        
+        if (-not (Test-Path $scriptPath)) {
+            Write-Error "Script not found at $scriptPath. Please check the file location."
+            exit 1
+        }
+        
+        $scriptContent = Get-Content -Path $scriptPath -Raw
+        
+        # Encode script
+        $bytes = [System.Text.Encoding]::Unicode.GetBytes($scriptContent)
+        $encodedText = [Convert]::ToBase64String($bytes)
+        
+        # Set pipeline variable
+        Write-Host "##vso[task.setvariable variable=encodedScript]$encodedText"
+
+        Then update your ARM template deployment:
+
+
+        - task: AzureResourceManagerTemplateDeployment@3
+  displayName: 'Deploy VM Extensions'
+  inputs:
+    deploymentScope: 'Resource Group'
+    azureResourceManagerConnection: 'YourServiceConnection'
+    subscriptionId: '$(subscriptionId)'
+    action: 'Create Or Update Resource Group'
+    resourceGroupName: '$(resourceGroupName)'
+    location: '$(location)'
+    templateLocation: 'Linked artifact'
+    csmFile: '$(vmTemplateFile)'
+    csmParametersFile: '$(vmParameterFile)'
+    overrideParameters: '-encodedScript "$(encodedScript)"'
+    deploymentMode: 'Incremental'
+
+
+
+
 
 
 
