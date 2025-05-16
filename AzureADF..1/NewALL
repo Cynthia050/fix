@@ -803,7 +803,8 @@ Step 3: Pass the parameter in your deployment task
 
 
 
- The new encoded script that was changed
+ The new encoded script that was changed (this was for the encription otion to get the install powershell scipt into the vm fo istallation
+ this method was not the best for the azure monitor I wsanted to install. that part from the vmextension.json script neede the storage.)
  
  - task: PowerShell@2
   displayName: 'Encode Script'
@@ -835,6 +836,126 @@ Step 3: Pass the parameter in your deployment task
 
 
 
+
+
+
+
+Using Storage Account for Both Script and Monitoring
+You're absolutely right - let's create a more automated solution that uses your existing storage account for both the install-ir.ps1 script and the monitoring agent. This approach will be environment-agnostic and reusable.
+Updated vmExtension.json Parameters
+
+
+"parameters": {
+  // Existing parameters...
+  "storageAccountName": {
+    "type": "string",
+    "defaultValue": "",
+    "metadata": {
+      "description": "Name of the storage account to use for scripts and monitoring"
+    }
+  },
+  "storageAccountResourceGroup": {
+    "type": "string",
+    "defaultValue": "[resourceGroup().name]",
+    "metadata": {
+      "description": "Resource group of the storage account"
+    }
+  },
+  "storageAccountSubscriptionId": {
+    "type": "string",
+    "defaultValue": "[subscription().subscriptionId]",
+    "metadata": {
+      "description": "Subscription ID of the storage account"
+    }
+  }
+}
+
+
+Upload Script to Storage in Pipeline
+Add this task to your pipeline before deploying the extension:
+
+- task: AzurePowerShell@5
+  displayName: 'Upload Script to Storage'
+  inputs:
+    azureSubscription: 'YourServiceConnection'
+    ScriptType: 'InlineScript'
+    Inline: |
+      # Create container if it doesn't exist
+      $storageAccount = "$(storageAccountName)"
+      $container = "scripts"
+      $resourceGroup = "$(storageAccountResourceGroup)"
+      
+      # Create container if it doesn't exist
+      $ctx = (Get-AzStorageAccount -ResourceGroupName $resourceGroup -Name $storageAccount).Context
+      New-AzStorageContainer -Name $container -Context $ctx -Permission Off -ErrorAction SilentlyContinue
+      
+      # Upload script to storage
+      Set-AzStorageBlobContent -File "$(Build.SourcesDirectory)/install-ir.ps1" -Container $container -Blob "install-ir.ps1" -Context $ctx -Force
+      
+      # Generate SAS token (valid for 24 hours)
+      $startTime = Get-Date
+      $endTime = $startTime.AddHours(24)
+      $sasToken = New-AzStorageBlobSASToken -Container $container -Blob "install-ir.ps1" -Permission r -StartTime $startTime -ExpiryTime $endTime -Context $ctx
+      
+      # Set variable for ARM template
+      Write-Host "##vso[task.setvariable variable=scriptSasUrl]https://$storageAccount.blob.core.windows.net/$container/install-ir.ps1$sasToken"
+    azurePowerShellVersion: 'LatestVersion'
+
+
+    Update InstallIR Extension in vmExtension.json
+"properties": {
+  "publisher": "Microsoft.Compute",
+  "type": "CustomScriptExtension",
+  "typeHandlerVersion": "1.10",
+  "autoUpgradeMinorVersion": true,
+  "settings": {
+    "fileUris": [
+      "$(scriptSasUrl)"
+    ]
+  },
+  "protectedSettings": {
+    "commandToExecute": "[concat('powershell -ExecutionPolicy Unrestricted -File install-ir.ps1 -AuthKey \"', reference('getIRKey').outputs.selfHostedIntegrationRuntimeKey1, '\" -NodeName \"', concat(parameters('vmBaseName'), copyIndex(1)), '\"')]"
+  }
+}
+
+Update AzureMonitorWindowsAgent Extension
+
+"properties": {
+  "publisher": "Microsoft.Azure.Monitor",
+  "type": "AzureMonitorWindowsAgent",
+  "typeHandlerVersion": "1.0",
+  "autoUpgradeMinorVersion": true,
+  "enableAutomaticUpgrade": true,
+  "settings": {
+    "authentication": {
+      "managedIdentity": {}
+    }
+  },
+  "protectedSettings": {
+    "storageAccountName": "[parameters('storageAccountName')]",
+    "storageAccountEndPoint": "https://core.windows.net/"
+  }
+}
+
+Deploy with Dynamic Parameters
+
+
+- task: AzurePowerShell@5
+  displayName: 'Deploy VM Extensions'
+  inputs:
+    azureSubscription: 'YourServiceConnection'
+    ScriptType: 'InlineScript'
+    Inline: |
+      # Deploy VM Extensions
+      New-AzResourceGroupDeployment `
+        -ResourceGroupName $(resourceGroupName) `
+        -TemplateFile "$(Build.SourcesDirectory)/vmExtension.json" `
+        -TemplateParameterFile "$(Build.SourcesDirectory)/vmExtension_parameters.json" `
+        -storageAccountName $(storageAccountName) `
+        -storageAccountResourceGroup $(storageAccountResourceGroup) `
+        -storageAccountSubscriptionId $(storageAccountSubscriptionId) `
+        -Verbose
+    azurePowerShellVersion: 'LatestVersion'
 
 
 
