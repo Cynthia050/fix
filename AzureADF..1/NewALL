@@ -679,6 +679,133 @@ steps:
 
 
 
+              Option 1: Azure Storage Approach (Recommended)
+              This approach uploads your script to Azure Storage temporarily, then your VMs download it from there.
+              Step 1: Modify your Azure Pipeline YAML
+              Add these tasks to your pipeline before your ARM deployment:
+
+
+              - task: AzurePowerShell@5
+              displayName: 'Upload Script to Storage'
+              inputs:
+                azureSubscription: 'YourServiceConnection'
+                ScriptType: 'InlineScript'
+                Inline: |
+                  # Create storage container if it doesn't exist
+                  $storageAccount = "stdeploymentscripts$(Get-Random -Maximum 999)"
+                  $container = "scripts"
+                  
+                  # Check if storage account exists, create if it doesn't
+                  $storageAccountExists = Get-AzStorageAccount -ResourceGroupName $(resourceGroupName) -Name $storageAccount -ErrorAction SilentlyContinue
+                  if (-not $storageAccountExists) {
+                      New-AzStorageAccount -ResourceGroupName $(resourceGroupName) -Name $storageAccount -Location $(location) -SkuName Standard_LRS
+                  }
+                  
+                  # Get storage account key and create context
+                  $key = (Get-AzStorageAccountKey -ResourceGroupName $(resourceGroupName) -Name $storageAccount)[0].Value
+                  $context = New-AzStorageContext -StorageAccountName $storageAccount -StorageAccountKey $key
+                  
+                  # Create container if it doesn't exist
+                  New-AzStorageContainer -Name $container -Context $context -Permission Blob -ErrorAction SilentlyContinue
+                  
+                  # Upload script to storage
+                  Set-AzStorageBlobContent -File "$(Build.SourcesDirectory)/install-ir.ps1" -Container $container -Blob "install-ir.ps1" -Context $context -Force
+                  
+                  # Generate SAS token (valid for 1 hour)
+                  $sasToken = New-AzStorageBlobSASToken -Container $container -Blob "install-ir.ps1" -Permission r -ExpiryTime (Get-Date).AddHours(1) -Context $context
+                  
+                  # Create full URL with SAS token
+                  $scriptUrl = "https://$storageAccount.blob.core.windows.net/$container/install-ir.ps1$sasToken"
+                  
+                  # Set as pipeline variable
+                  Write-Host "##vso[task.setvariable variable=scriptUrl]$scriptUrl"
+                azurePowerShellVersion: 'LatestVersion'
+                
+               Step 2: Update your vmExtension.json template
+Update the fileUris to use the URL from the pipeline variable:
+json
+
+
+"fileUris": [
+    "$(scriptUrl)"
+],
+
+In your Azure DevOps pipeline, use a task to replace the token:
+yaml
+
+- task: FileTransform@1
+  inputs:
+    folderPath: '$(Build.SourcesDirectory)'
+    fileType: 'json'
+    targetFiles: '**/vmExtension.json'
+
+ 
+    Option 2: Embed the Script in ARM Template (Simpler)
+If your script is not too large, you can embed it directly:
+Step 1: Convert your install-ir.ps1 to Base64
+Add this to your pipeline:
+
+
+
+- task: PowerShell@2
+  displayName: 'Encode Script'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $scriptContent = Get-Content -Path "$(Build.SourcesDirectory)/install-ir.ps1" -Raw
+      $bytes = [System.Text.Encoding]::UTF8.GetBytes($scriptContent)
+      $encodedText = [Convert]::ToBase64String($bytes)
+      Write-Host "##vso[task.setvariable variable=encodedScript]$encodedText"
+
+
+
+      Step 2: Modify vmExtension.json
+Update your VM extension to use inline script:
+
+
+"properties": {
+  "publisher": "Microsoft.Compute",
+  "type": "CustomScriptExtension",
+  "typeHandlerVersion": "1.10",
+  "autoUpgradeMinorVersion": true,
+  "protectedSettings": {
+    "commandToExecute": "[concat('powershell -ExecutionPolicy Unrestricted -EncodedCommand ', parameters('encodedScript'), ' -AuthKey \"', reference('getIRKey').outputs.authKey, '\" -NodeName \"', concat('VOSDEVDS0', copyIndex(1)), '\"')]"
+  }
+}
+
+Add this parameter to your vmExtension.json:
+
+"parameters": {
+  "encodedScript": {
+    "type": "string",
+    "metadata": {
+      "description": "Base64 encoded script content"
+    }
+  },
+  // ... other parameters
+}
+
+
+Step 3: Pass the parameter in your deployment task
+
+- task: AzurePowerShell@5
+  displayName: 'Deploy VM Extensions'
+  inputs:
+    azureSubscription: 'YourServiceConnection'
+    ScriptType: 'InlineScript'
+    Inline: |
+      # Deploy VM Extensions
+      New-AzResourceGroupDeployment `
+        -ResourceGroupName $(resourceGroupName) `
+        -TemplateFile "$(templateFilePath)" `
+        -TemplateParameterFile "$(parametersFilePath)" `
+        -encodedScript "$(encodedScript)"
+
+        
+
+
+
+
 
 
 
