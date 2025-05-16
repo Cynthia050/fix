@@ -801,7 +801,36 @@ Step 3: Pass the parameter in your deployment task
         -TemplateParameterFile "$(parametersFilePath)" `
         -encodedScript "$(encodedScript)"
 
-        
+
+
+ The new encoded script that was changed
+ 
+ - task: PowerShell@2
+  displayName: 'Encode Script'
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Read the script content
+      $scriptContent = Get-Content -Path "$(powershellScript)" -Raw
+      
+      # Create a wrapper script with placeholders for your variables
+      $wrapperScript = @"
+      # Script with embedded parameters
+      param()
+      
+      # Values that will be replaced by ARM template
+      `$AuthKey = '##AUTHKEY##'
+      `$NodeName = '##NODENAME##'
+      
+      $scriptContent
+      "@
+      
+      # Convert to Base64
+      $bytes = [System.Text.Encoding]::Unicode.GetBytes($wrapperScript)
+      $encodedText = [Convert]::ToBase64String($bytes)
+      
+      # Set pipeline variable
+      Write-Host "##vso[task.setvariable variable=encodedScript]$encodedText"
 
 
 
