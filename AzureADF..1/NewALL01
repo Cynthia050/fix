@@ -13,7 +13,7 @@ Here are all the files you need with the complete changes:
     },
     "vmBaseName": {
       "type": "string",
-      "defaultValue": "VOSDEVDS"
+      "defaultValue": ""
     },
     "vmCount": {
       "type": "int",
@@ -21,7 +21,7 @@ Here are all the files you need with the complete changes:
     },
     "dataFactoryName": {
       "type": "string",
-      "defaultValue": "vos-iaz-df-dev-ndrdatasync"
+      "defaultValue": ""
     },
     "integrationRuntimeName": {
       "type": "string",
@@ -90,13 +90,13 @@ Here are all the files you need with the complete changes:
       "value": "uksouth"
     },
     "vmBaseName": {
-      "value": "VOSDEVDS"
+      "value": ""
     },
     "vmCount": {
       "value": 3
     },
     "dataFactoryName": {
-      "value": "vos-iaz-df-dev-ndrdatasync"
+      "value": ""
     },
     "integrationRuntimeName": {
       "value": "SelfHostedIntegrationRuntime"
@@ -111,11 +111,11 @@ Here's the complete pipeline YAML with all steps for deploying VM extensions:
 
 # Variables (define at the top of your pipeline)
 variables:
-  resourceGroupName: 'C190VOArpVOSDEVDataSyncNDR'
+  resourceGroupName: ''
   location: 'uksouth'
-  dataFactoryName: 'vos-iaz-df-dev-ndrdatasync'
+  dataFactoryName: ''
   integrationRuntimeName: 'SelfHostedIntegrationRuntime'
-  vmBaseName: 'VOSDEVDS'
+  vmBaseName: ''
   vmCount: 3
   vmTemplateFile: '$(Build.SourcesDirectory)/Infrastructure/NDRDataMigration/vmExtension.json'
   vmParameterFile: '$(Build.SourcesDirectory)/Infrastructure/NDRDataMigration/vmExtension_parameters.json'
@@ -218,7 +218,7 @@ steps:
     deploymentMode: 'Incremental'
 
 
-    
+
 
 
 
