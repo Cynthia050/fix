@@ -219,6 +219,83 @@ steps:
 
 
 
+Fixing the "Command Line Too Long" Error
+I see the problem in your screenshots. The error indicates: "The command line is too long". This is a common limitation with the CustomScriptExtension - there's a maximum length for the command line that can be passed.
+Solution: Use a Two-Stage Approach
+We need to split this into two stages:
+
+First, create a small bootstrap script that will be encoded (keeping it short)
+The bootstrap script will create and execute the full install-ir.ps1 script
+
+Here's how to implement this:
+1. Update the Encode Script Task
+
+
+
+- task: PowerShell@2
+  displayName: 'Create Bootstrap Script'
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Read the original script
+      $scriptPath = "$(scriptPath)"
+      $originalScript = Get-Content -Path $scriptPath -Raw
+      
+      # Create a short bootstrap script that will write and execute the main script
+      $bootstrapScript = @"
+      # Bootstrap script
+      `$AuthKey = '$(irAuthKey)'
+      `$NodeName = '__NODENAME__'
+      
+      # Write the main script to disk
+      `$mainScriptContent = @'
+      $originalScript
+      '@
+      
+      # Save the main script to disk
+      Set-Content -Path "C:\install-ir-main.ps1" -Value `$mainScriptContent
+      
+      # Execute the main script with parameters
+      & "C:\install-ir-main.ps1" -AuthKey `$AuthKey -NodeName `$NodeName
+      exit `$LASTEXITCODE
+      "@
+      
+      # Encode the bootstrap script (which is much shorter)
+      $bytes = [System.Text.Encoding]::Unicode.GetBytes($bootstrapScript)
+      $encodedText = [Convert]::ToBase64String($bytes)
+      
+      Write-Host "Bootstrap script created and encoded"
+      Write-Host "##vso[task.setvariable variable=encodedBootstrap]$encodedText"
+
+
+2. Update the vmExtension.json Template
+
+"protectedSettings": {
+  "commandToExecute": "[concat('powershell -ExecutionPolicy Unrestricted -EncodedCommand ', replace(parameters('encodedScript'), '__NODENAME__', concat(parameters('vmBaseName'), copyIndex(1))))]"
+}
+
+3. Update the ARM Deployment Task
+
+
+- task: AzureResourceManagerTemplateDeployment@3
+  displayName: 'Deploy VM Extensions'
+  inputs:
+    deploymentScope: 'Resource Group'
+    azureResourceManagerConnection: 'YourServiceConnection'
+    subscriptionId: '$(subscription().subscriptionId)'
+    action: 'Create Or Update Resource Group'
+    resourceGroupName: '$(resourceGroupName)'
+    location: '$(location)'
+    templateLocation: 'Linked artifact'
+    csmFile: '$(vmTemplateFile)'
+    csmParametersFile: '$(vmParameterFile)'
+    overrideParameters: '-encodedScript "$(encodedBootstrap)" -vmBaseName "$(vmBaseName)" -vmCount $(vmCount) -dataFactoryName "$(dataFactoryName)" -integrationRuntimeName "$(integrationRuntimeName)"'
+    deploymentMode: 'Incremental'
+
+
+
+    
+
 
 
 
