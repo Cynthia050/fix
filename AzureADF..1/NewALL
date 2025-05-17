@@ -1042,5 +1042,100 @@ Deploy with Dynamic Parameters
 
 
 
+    The Issue Explained
+    The getIRKey deployment script in your ARM template tries to use the Microsoft.Resources/deploymentScripts resource type, which requires Container Instances to run PowerShell. Your service principal doesn't have permissions to use Container Instances.
+    Let's Fix It - Simple Alternative Approach
+    Here's a much simpler approach that avoids all these permission issues:
+    1. Split the Deployment Into Two Steps
+    Step 1: First get the Integration Runtime key manually and store it as a pipeline variable:
+
+
+    - task: AzurePowerShell@5
+    displayName: 'Get Integration Runtime Key'
+    inputs:
+      azureSubscription: 'YourServiceConnection'
+      ScriptType: 'InlineScript'
+      Inline: |
+        # Get IR key
+        $irKey = Get-AzDataFactoryV2IntegrationRuntimeKey `
+          -ResourceGroupName "$(resourceGroupName)" `
+          -DataFactoryName "" `
+          -Name "SelfHostedIntegrationRuntime"
+        
+        # Set as pipeline variable
+        Write-Host "##vso[task.setvariable variable=irAuthKey]$($irKey.AuthKey1)"
+      azurePowerShellVersion: 'LatestVersion'
+      
+      
+   
+      
+      Step 2: Encode the install-ir.ps1 with the real key embedded:
+
+
+
+      - task: PowerShell@2
+      displayName: 'Encode Script with Auth Key'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Read the script
+          $scriptPath = "$(Build.SourcesDirectory)/Infrastructure/NDRDataMigration/install-ir.ps1"
+          $scriptContent = Get-Content -Path $scriptPath -Raw
+          
+          # Replace placeholder in script with actual key
+          $scriptWithKey = @"
+          param()
+          
+          # Actual key and node name variables
+          `$AuthKey = '$(irAuthKey)'
+          `$NodeName = '__NODENAME__'  # Will be replaced in ARM template
+          
+          $scriptContent
+          "@
+          
+          # Encode script
+          $bytes = [System.Text.Encoding]::Unicode.GetBytes($scriptWithKey)
+          $encodedText = [Convert]::ToBase64String($bytes)
+          
+          Write-Host "##vso[task.setvariable variable=encodedScript]$encodedText"
+
+
+
+
+
+
+
+          Step 3: Modify the VM Extension ARM template:
+          Update the part of your vmExtension.json file that uses getIRKey:
+          
+          
+
+        // REMOVE this part entirely:
+{
+  "type": "Microsoft.Resources/deploymentScripts",
+  "apiVersion": "2020-10-01",
+  "name": "getIRKey",
+  "location": "[parameters('location')]",
+  "kind": "AzurePowerShell",
+  ...
+},
+
+// CHANGE this part:
+"dependsOn": [
+  // Remove any reference to getIRKey
+],
+"properties": {
+  "publisher": "Microsoft.Compute",
+  "type": "CustomScriptExtension",
+  "typeHandlerVersion": "1.10",
+  "autoUpgradeMinorVersion": true,
+  "settings": {},
+  "protectedSettings": {
+    "commandToExecute": "[concat('powershell -ExecutionPolicy Unrestricted -EncodedCommand ', replace(parameters('encodedScript'), '__NODENAME__', concat(parameters('vmBaseName'), copyIndex(1))))]"
+  }
+}
+
+
+
 
 

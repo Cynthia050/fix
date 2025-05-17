@@ -1,0 +1,226 @@
+Complete Solution with All Changes
+Here are all the files you need with the complete changes:
+1. Updated vmExtension.json
+
+
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "uksouth"
+    },
+    "vmBaseName": {
+      "type": "string",
+      "defaultValue": "VOSDEVDS"
+    },
+    "vmCount": {
+      "type": "int",
+      "defaultValue": 3
+    },
+    "dataFactoryName": {
+      "type": "string",
+      "defaultValue": "vos-iaz-df-dev-ndrdatasync"
+    },
+    "integrationRuntimeName": {
+      "type": "string",
+      "defaultValue": "SelfHostedIntegrationRuntime"
+    },
+    "encodedScript": {
+      "type": "string",
+      "metadata": {
+        "description": "Base64 encoded install-ir.ps1 script content with embedded IR auth key"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2021-07-01",
+      "name": "[concat(parameters('vmBaseName'), copyIndex(1), '/InstallIR')]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "vmExtensionCopy",
+        "count": "[parameters('vmCount')]"
+      },
+      "properties": {
+        "publisher": "Microsoft.Compute",
+        "type": "CustomScriptExtension",
+        "typeHandlerVersion": "1.10",
+        "autoUpgradeMinorVersion": true,
+        "settings": {},
+        "protectedSettings": {
+          "commandToExecute": "[concat('powershell -ExecutionPolicy Unrestricted -EncodedCommand ', replace(parameters('encodedScript'), '__NODENAME__', concat(parameters('vmBaseName'), copyIndex(1))))]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2021-07-01",
+      "name": "[concat(parameters('vmBaseName'), copyIndex(1), '/AzureMonitorWindowsAgent')]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "monitoringExtensionCopy",
+        "count": "[parameters('vmCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines/extensions', concat(parameters('vmBaseName'), copyIndex(1)), 'InstallIR')]"
+      ],
+      "properties": {
+        "publisher": "Microsoft.Azure.Monitor",
+        "type": "AzureMonitorWindowsAgent",
+        "typeHandlerVersion": "1.0",
+        "autoUpgradeMinorVersion": true,
+        "enableAutomaticUpgrade": true,
+        "settings": {},
+        "protectedSettings": {}
+      }
+    }
+  ]
+}
+
+2. Updated vmExtension_parameters.json
+
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "uksouth"
+    },
+    "vmBaseName": {
+      "value": "VOSDEVDS"
+    },
+    "vmCount": {
+      "value": 3
+    },
+    "dataFactoryName": {
+      "value": "vos-iaz-df-dev-ndrdatasync"
+    },
+    "integrationRuntimeName": {
+      "value": "SelfHostedIntegrationRuntime"
+    }
+    // encodedScript parameter will be passed via pipeline override parameters
+  }
+}
+
+
+3. Complete Pipeline YAML
+Here's the complete pipeline YAML with all steps for deploying VM extensions:
+
+# Variables (define at the top of your pipeline)
+variables:
+  resourceGroupName: 'C190VOArpVOSDEVDataSyncNDR'
+  location: 'uksouth'
+  dataFactoryName: 'vos-iaz-df-dev-ndrdatasync'
+  integrationRuntimeName: 'SelfHostedIntegrationRuntime'
+  vmBaseName: 'VOSDEVDS'
+  vmCount: 3
+  vmTemplateFile: '$(Build.SourcesDirectory)/Infrastructure/NDRDataMigration/vmExtension.json'
+  vmParameterFile: '$(Build.SourcesDirectory)/Infrastructure/NDRDataMigration/vmExtension_parameters.json'
+
+# Add these steps to your pipeline
+steps:
+# Step 1: Find the install-ir.ps1 file path
+- task: PowerShell@2
+  displayName: 'Find install-ir.ps1 Script Path'
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Search for the file in the repo
+      $scriptPath = Get-ChildItem -Path $(Build.SourcesDirectory) -Filter "install-ir.ps1" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+      
+      if ($scriptPath) {
+        Write-Host "Script found at: $scriptPath"
+        Write-Host "##vso[task.setvariable variable=scriptPath]$scriptPath"
+      } else {
+        Write-Error "install-ir.ps1 not found in repository. Please check the file exists."
+        exit 1
+      }
+
+# Step 2: Get IR AuthKey directly using PowerShell
+- task: AzurePowerShell@5
+  displayName: 'Get Integration Runtime Key'
+  inputs:
+    azureSubscription: 'YourServiceConnection'
+    ScriptType: 'InlineScript'
+    Inline: |
+      # Get the IR key
+      Write-Host "Getting integration runtime key for $(dataFactoryName)/$(integrationRuntimeName)"
+      try {
+        $irKey = Get-AzDataFactoryV2IntegrationRuntimeKey `
+          -ResourceGroupName "$(resourceGroupName)" `
+          -DataFactoryName "$(dataFactoryName)" `
+          -Name "$(integrationRuntimeName)"
+        
+        # Set as pipeline variable
+        Write-Host "Successfully retrieved integration runtime key"
+        Write-Host "##vso[task.setvariable variable=irAuthKey]$($irKey.AuthKey1)"
+      }
+      catch {
+        Write-Error "Failed to get integration runtime key: $_"
+        throw $_
+      }
+    azurePowerShellVersion: 'LatestVersion'
+
+# Step 3: Encode script with embedded AuthKey
+- task: PowerShell@2
+  displayName: 'Encode IR Script with Auth Key'
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Read the script
+      $scriptPath = "$(scriptPath)"
+      Write-Host "Reading script from: $scriptPath"
+      
+      if (-not (Test-Path $scriptPath)) {
+        Write-Error "Script not found at $scriptPath"
+        exit 1
+      }
+      
+      $scriptContent = Get-Content -Path $scriptPath -Raw
+      
+      # Replace placeholder in script with actual key
+      $scriptWithKey = @"
+      # Script with embedded parameters (added by deployment pipeline)
+      param()
+      
+      # Actual key and node name variables
+      `$AuthKey = '$(irAuthKey)'
+      `$NodeName = '__NODENAME__'  # Will be replaced in ARM template
+      
+      # Original script content follows
+      $scriptContent
+      "@
+      
+      # Encode script
+      $bytes = [System.Text.Encoding]::Unicode.GetBytes($scriptWithKey)
+      $encodedText = [Convert]::ToBase64String($bytes)
+      
+      Write-Host "Script successfully encoded with embedded IR key"
+      Write-Host "##vso[task.setvariable variable=encodedScript]$encodedText"
+
+# Step 4: Deploy VM Extensions with encoded script
+- task: AzureResourceManagerTemplateDeployment@3
+  displayName: 'Deploy VM Extensions'
+  inputs:
+    deploymentScope: 'Resource Group'
+    azureResourceManagerConnection: 'YourServiceConnection'
+    subscriptionId: '$(subscription().subscriptionId)'
+    action: 'Create Or Update Resource Group'
+    resourceGroupName: '$(resourceGroupName)'
+    location: '$(location)'
+    templateLocation: 'Linked artifact'
+    csmFile: '$(vmTemplateFile)'
+    csmParametersFile: '$(vmParameterFile)'
+    overrideParameters: '-encodedScript "$(encodedScript)" -vmBaseName "$(vmBaseName)" -vmCount $(vmCount) -dataFactoryName "$(dataFactoryName)" -integrationRuntimeName "$(integrationRuntimeName)"'
+    deploymentMode: 'Incremental'
+
+
+    
+
+
+
+
+
